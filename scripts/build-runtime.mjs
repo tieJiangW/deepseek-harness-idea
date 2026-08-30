@@ -56,8 +56,8 @@ function osId(o) {
 const TARGETS = {
   'win-x64':     { os: 'win32',  file: (v) => `node-v${v}-win-x64.zip`,        sub: (v) => `node-v${v}-win-x64`,       nodeBin: 'node.exe', npmRel: 'node_modules/npm/bin/npm-cli.js' },
   'win-arm64':   { os: 'win32',  file: (v) => `node-v${v}-win-arm64.zip`,      sub: (v) => `node-v${v}-win-arm64`,     nodeBin: 'node.exe', npmRel: 'node_modules/npm/bin/npm-cli.js' },
-  'darwin-x64':  { os: 'darwin', file: (v) => `node-v${v}-darwin-x64.tar.gz`,  sub: (v) => `node-v${v}-darwin-x64`,    nodeBin: 'node',     npmRel: 'lib/node_modules/npm/bin/npm-cli.js' },
-  'darwin-arm64':{ os: 'darwin', file: (v) => `node-v${v}-darwin-arm64.tar.gz`,sub: (v) => `node-v${v}-darwin-arm64`,  nodeBin: 'node',     npmRel: 'lib/node_modules/npm/bin/npm-cli.js' },
+  'macos-x64':  { os: 'darwin', file: (v) => `node-v${v}-darwin-x64.tar.gz`,  sub: (v) => `node-v${v}-darwin-x64`,    nodeBin: 'node',     npmRel: 'lib/node_modules/npm/bin/npm-cli.js' },
+  'macos-arm64':{ os: 'darwin', file: (v) => `node-v${v}-darwin-arm64.tar.gz`,sub: (v) => `node-v${v}-darwin-arm64`,  nodeBin: 'node',     npmRel: 'lib/node_modules/npm/bin/npm-cli.js' },
   'linux-x64':   { os: 'linux',  file: (v) => `node-v${v}-linux-x64.tar.gz`,   sub: (v) => `node-v${v}-linux-x64`,     nodeBin: 'node',     npmRel: 'lib/node_modules/npm/bin/npm-cli.js' },
   'linux-arm64': { os: 'linux',  file: (v) => `node-v${v}-linux-arm64.tar.gz`, sub: (v) => `node-v${v}-linux-arm64`,   nodeBin: 'node',     npmRel: 'lib/node_modules/npm/bin/npm-cli.js' },
 };
