@@ -81,6 +81,7 @@ async function fetchTo(url, dest) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);
   const buf = Buffer.from(await r.arrayBuffer());
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, buf);
 }
 
@@ -92,6 +93,10 @@ const bundleZip = path.join(root, 'build', `runtime-${osId(osName)}-${arch}.zip`
 
 async function main() {
   log(`DSH runtime build: node v${nodeVersion} + @deepseek-ai/dsh@${dshVersion} -> ${output}`);
+  // fresh checkout 无 build/ 等目录：先确保存在（下载包写 build/ 上层、bundle 到 build/）
+  fs.mkdirSync(path.dirname(output), { recursive: true });
+  fs.mkdirSync(output, { recursive: true });
+  fs.mkdirSync(path.dirname(bundleZip), { recursive: true });
 
   // ---- 1. Node ----
   if (fs.existsSync(nodeExe) && !force) {

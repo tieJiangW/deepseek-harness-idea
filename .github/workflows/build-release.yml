@@ -47,7 +47,9 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
       - name: Build thin plugin (default)
-        run: ./gradlew buildPlugin --no-daemon --console=plain
+        run: |
+          chmod +x gradlew
+          ./gradlew buildPlugin --no-daemon --console=plain
       - name: Upload plugin artifact
         uses: actions/upload-artifact@v4
         with:
