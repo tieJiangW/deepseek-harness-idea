@@ -172,8 +172,13 @@ async function main() {
   if (bundle) {
     log('Bundle runtime-' + targetKey + '.zip');
     fs.rmSync(bundleZip, { force: true });
-    const tarArgs = ['-a', '-c', '-f', bundleZip, '--exclude', '*.zip', '--exclude', '.npm-cache', '-C', output, 'node', 'dsh'];
-    sh('tar', tarArgs);
+    // Windows: bsdtar 的 `-a` 能生成真正的 zip。GNU tar（linux/macOS 上的 /usr/bin/tar）的 `-a` 不认 .zip，
+    // 只会产出裸 tar（体积大且插件 ZipFile 打不开），故 unix 改用 `zip` 命令。
+    if (t.os === 'win32') {
+      sh('tar', ['-a', '-c', '-f', bundleZip, '--exclude', '*.zip', '--exclude', '.npm-cache', '-C', output, 'node', 'dsh']);
+    } else {
+      sh('zip', ['-r', '-q', bundleZip, 'node', 'dsh'], { cwd: output });
+    }
     const sizeMb = Math.round(fs.statSync(bundleZip).size / 1048576 * 10) / 10;
     console.log(`   -> ${bundleZip} (${sizeMb} MB)`);
     fs.writeFileSync(bundleZip + '.sha256', sha256(bundleZip) + '\n');
