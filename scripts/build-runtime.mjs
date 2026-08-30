@@ -44,10 +44,11 @@ const force = flag('force');
 const bundle = flag('bundle');
 
 function osId(o) {
-  const n = String(o).toLowerCase();
-  if (n.includes('win')) return 'win';
-  if (n.includes('darwin') || n.includes('mac')) return 'macos';
-  if (n.includes('linux')) return 'linux';
+  const n = String(o).trim().toLowerCase();
+  // 用前缀匹配，避免 'darwin' 含 'win' 造成误判为 Windows
+  if (n.startsWith('win')) return 'win';
+  if (n.startsWith('darwin') || n.startsWith('mac')) return 'macos';
+  if (n.startsWith('linux')) return 'linux';
   return n;
 }
 

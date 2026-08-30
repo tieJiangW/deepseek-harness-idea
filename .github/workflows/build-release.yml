@@ -15,8 +15,7 @@ jobs:
       matrix:
         include:
           - os: windows-latest   # win-x64
-          - os: macos-13         # macos-x64 (Intel)
-          - os: macos-14         # macos-arm64 (Apple Silicon)
+          - os: macos-14         # macos-arm64 (Apple Silicon; Intel macOS runner 已被 GitHub 淘汰，无可用 runner)
           - os: ubuntu-22.04     # linux-x64
     runs-on: ${{ matrix.os }}
     steps:
