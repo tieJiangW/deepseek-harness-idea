@@ -27,6 +27,8 @@ jobs:
         run: node scripts/build-runtime.mjs --bundle
         env:
           npm_config_registry: ${{ secrets.NPM_REGISTRY || 'https://registry.npmmirror.com/' }}
+          # macos-arm64 npm install of the large dsh tree can OOM; give node a bigger heap
+          NODE_OPTIONS: '--max-old-space-size=4096'
       - name: Upload runtime artifacts
         uses: actions/upload-artifact@v4
         with:

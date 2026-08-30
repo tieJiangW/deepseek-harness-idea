@@ -159,7 +159,7 @@ async function main() {
     const npmCli = path.join(nodeDir, t.npmRel);
     if (!fs.existsSync(npmCli)) throw new Error(`bundled npm-cli.js missing: ${npmCli}`);
     const npmArgs = [npmCli, 'install', '--ignore-scripts', '--no-audit', '--no-fund', '--cache', cacheDir, '--registry', registry, '--os', t.os, '--cpu', arch];
-    sh(nodeExe, npmArgs, { cwd: dshDir });
+    sh(nodeExe, npmArgs, { cwd: dshDir, env: { ...process.env, NODE_OPTIONS: '--max-old-space-size=4096' } });
     if (!fs.existsSync(dshBin)) throw new Error(`dsh bin missing after install: ${dshBin}`);
   }
 
