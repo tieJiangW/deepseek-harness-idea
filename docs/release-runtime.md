@@ -117,3 +117,27 @@ runner 上构建**（见 `.github/workflows/build-release.yml`）。
 - **有已解压的运行时**：设 `DSH_IDEA_RUNTIME`（或「运行时目录」手动路径）指向它 → 无需下载；
 - **有内网镜像**：把「Runtime download URL」填成内网地址（含同名 `.sha256` 侧车）→ 从内网下载；
 - **想完全离线、零设置**：用 `./gradlew buildPlugin -Pthin=false` 构建含运行时的 fat zip，装完即用（当前平台）。
+
+## 7. 后续改进计划（未实施）
+
+### 7.1 运行时下载地址按 DSH 版本解耦（避免随插件版本重复上传 / 重新下载）
+
+**现状**：插件的运行时下载地址用 `{version}` = **插件版本**，即默认
+`https://github.com/tieJiangW/deepseek-harness-idea/releases/download/v{version}/runtime-<os>-<arch>.zip`。
+运行时缓存目录按 `DSH_VERSION`（`DshHomeManager.DSH_VERSION`，如 `0.1.1-rc.2`）命名，
+`RuntimeProvisioner.isPresent(runtimeRoot())` 短路保证**已装好运行时的老用户在插件版本升级后不重新下载**。
+
+**改进方向**：把下载 URL 的 `{version}` 从「插件版本」改为「**DSH 运行时版本**」，`runtime-assets.json` 的
+`baseUrl` 改用 `v{dshVersion}` 占位，并把各平台运行时 zip 挂到一个**按 DSH 版本命名的稳定 tag**（如
+`v0.1.1-rc.2`）。这样无论插件版本怎么变，只要 `DSH_VERSION` 常量不变，新装用户与老用户都指向
+**同一个运行时下载地址** —— 不再需要随每个插件版本重复上传运行时，也不需要重新下载。
+
+**前置（发布动作，未执行）**：需新建 `v0.1.1-rc.2`（或对应 DSH 版本）Release 并挂载各平台
+`runtime-<os>-<arch>.zip` + `.sha256`（文件已在 `release-assets/` 可复现）。当前 v0.2.0 仍以插件版本为下载源，**未改动**。
+
+### 7.2 其它预留
+
+- **完整跟随 IntelliJ HTTP 代理**：`HttpFetcher` 已用 `java.net.http.HttpClient`，代理回退到 JVM 默认
+  `ProxySelector`（即直连 / 跟随系统代理属性）。进一步让下载**读取 IDE「Settings → HTTP Proxy」配置**
+  （`com.intellij.util.net.HttpConfigurable`）并据此构造 `ProxySelector`，作为后续改进。
+- **下载失败归因与重试调参**：当前校验和与下载各最多 3 次退避重试（1s/2s/4s），可做成可配置项。

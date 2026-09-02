@@ -28,6 +28,25 @@ object RuntimeArchive {
     }
 
     /**
+     * 校验一个 zip 是否为可用的运行时包：解压（含单层前缀剥离后）应包含
+     * `node/<nodeBinName>` 与 `dsh/node_modules/@deepseek-ai/dsh/lib/bin.js`。
+     * 供本地运行时 zip 导入前校验（[RuntimeProvisioner.provisionFromLocal]）。
+     */
+    fun validateRuntimeZip(zip: Path): Boolean = try {
+        ZipFile(zip.toFile()).use { zf ->
+            val fileEntries = zf.entries().asSequence().filter { !it.isDirectory }.toList()
+            val topPrefix = fileEntries.mapNotNull { entry ->
+                entry.name.split('/').firstOrNull()?.takeIf { it.isNotEmpty() }
+            }.distinct().let { if (it.size == 1) it.first() + "/" else "" }
+            val hasNode = fileEntries.any { it.name.removePrefix(topPrefix) == "node/${Platform.current().nodeBinName}" }
+            val hasDsh = fileEntries.any { it.name.removePrefix(topPrefix) == "dsh/node_modules/@deepseek-ai/dsh/lib/bin.js" }
+            hasNode && hasDsh
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
      * 安全解压 zip 到 [dest]（幂等：可重复解压）。
      * - 兼容 zip 顶层带单目录前缀（如 `runtime/`）的情况：剥掉第一层；
      * - zip-slip 防护：目标必须位于 `dest` 下，否则跳过；

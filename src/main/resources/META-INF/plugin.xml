@@ -29,6 +29,8 @@
             processes are terminated on project close / IDE exit; crash auto-restart with backoff.</li>
             <li><b>Logs &amp; diagnostics</b> — a DSH Log tab shows the dsh process output; crash
             notifications and a configurable log level help you debug.</li>
+            <li><b>Robust runtime provisioning</b> — the per-platform runtime downloads on first use with a live
+            progress bar and cancel, is SHA-256 verified, and can be imported from a local zip for offline use.</li>
             <li><b>Bilingual UI</b> — all plugin UI follows your IDE language (English / 简体中文).</li>
         </ul>
 
@@ -76,6 +78,8 @@
             自动终止进程；崩溃自动退避重启。</li>
             <li><b>日志与诊断</b> — DSH Log 标签页显示 dsh 进程输出；崩溃通知与可配置日志级别
             便于排查。</li>
+            <li><b>可靠的运行时下发</b> — 首次使用按平台下载运行时，带实时进度条与取消、SHA-256 校验，
+            也可从本地压缩包离线导入。</li>
             <li><b>中英双语界面</b> — 插件 UI 跟随 IDE 语言（English / 简体中文）。</li>
         </ul>
 
@@ -99,6 +103,27 @@
 
     <change-notes><![CDATA[
         <h3>English / 中文</h3>
+        <h4>v0.2.1</h4>
+        <ul>
+            <li><b>Fixed a first-use runtime download failure.</b> On some setups the per-platform runtime could not be fetched: the temporary download file is written next to the runtime directory, whose parent directory does not exist yet on a fresh install, causing a <code>NoSuchFileException</code> ("download failed" with no progress). The plugin now creates the directory before writing, so first use downloads and verifies the runtime correctly.</li>
+            <li><b>修复首次使用运行时下载失败的问题。</b>部分环境下按平台运行时无法下发：临时下载文件写在运行时目录旁，而全新安装时其父目录尚不存在，导致 <code>NoSuchFileException</code>（报"下载失败"且无进度）。插件现先创建目录再落盘，首次使用即可正确下载并校验运行时。</li>
+        </ul>
+        <ul>
+            <li><b>More reliable runtime download.</b> The download client now uses a pooled, HTTP/2-capable client with a browser User-Agent, a relaxed 60s connect timeout and a configurable read timeout, plus backoff retries. First-use runtime downloads now succeed even on slow or unstable networks (e.g. GitHub access from mainland China), instead of giving up after a short timeout.</li>
+            <li><b>更可靠的运行时下载。</b>下载改用带连接池、支持 HTTP/2 的客户端，并附带浏览器用户代理、放宽到 60 秒的连接超时与可配置的读取超时，以及退避重试。即便在慢速或不稳定网络（如国内访问 GitHub）下，首次运行时下载也能成功，而不再因短超时即放弃。</li>
+        </ul>
+        <ul>
+            <li><b>Download progress bar with cancel.</b> The tool window now shows a live progress bar (bytes / MB / speed) while fetching the runtime, with progress states ("connecting / verifying / downloading") and a cancel action; it no longer blocks the UI or sits silently at 0%.</li>
+            <li><b>运行时下载进度条（可取消）。</b>工具窗口在获取运行时期间会显示实时进度条（字节 / MB / 速率），并给出"正在连接/校验/下载"状态与取消入口；不再阻塞界面或停在 0% 无反应。</li>
+        </ul>
+        <ul>
+            <li><b>Import a local runtime zip.</b> Settings and the error card now offer "Choose local runtime zip…", letting you point the plugin at an already-downloaded per-platform runtime zip (validated, SHA-256 checked against a sidecar) to start completely offline.</li>
+            <li><b>导入本地运行时包。</b>设置页与错误卡新增"选择本地运行时压缩包…"，可指向已下载好的按平台运行时 zip（校验有效性并按侧车做 SHA-256 校验），完全离线即可启动。</li>
+        </ul>
+        <ul>
+            <li><b>Clear diagnostics.</b> Settings shows the exact per-platform runtime download URL (down to the file) with one-click copy, and the runtime download timeout is configurable. On failure the error card shows the exact URL that failed and the underlying cause, plus "Restart harness" and a route to Settings.</li>
+            <li><b>更清晰的诊断。</b>设置页回显当前平台完整的运行时下载地址（精确到文件）并可一键复制，下载超时可配置；失败时错误卡给出失败的具体地址与根因，并提供"重启 Harness"与直达设置入口。</li>
+        </ul>
         <h4>v0.2.0</h4>
         <ul>
             <li>Fixed an install-time "invalid plugin descriptor" error on some IDE versions: the optional

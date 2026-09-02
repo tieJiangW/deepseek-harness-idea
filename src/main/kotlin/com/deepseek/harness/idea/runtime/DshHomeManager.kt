@@ -73,23 +73,51 @@ class DshHomeManager : Disposable {
     fun hasRuntime(): Boolean {
         if (RuntimeProvisioner.isPresent(runtimeRoot())) return true
         if (System.getenv(RUNTIME_OVERRIDE_ENV) != null) return false // 覆盖显式指向但缺失 → 报错
-        return provisionRuntime()
+        return provisionBundledOrDownload()
     }
 
     /** 供供给：内置资源解压 → 无资源时按平台下载。任一步成功即视为运行时就绪。 */
-    private fun provisionRuntime(): Boolean {
-        if (extractBundledRuntime()) return true
-        return downloadRuntime()
+    private fun provisionBundledOrDownload(): Boolean =
+        if (extractBundledRuntime()) true
+        else downloadRuntimeInternal().let { it is RuntimeProvisioner.ProvisionResult.Ready }
+
+    /**
+     * 异步友好：按当前平台从资产地图下载运行时，支持进度/超时/取消（供工具窗口后台任务调用）。
+     * 已就绪短路返回 [RuntimeProvisioner.ProvisionResult.Ready]；DSH_IDEA_RUNTIME 显式指向但缺失 → 失败。
+     */
+    fun ensureRuntimeProvisioned(options: RuntimeProvisioner.DownloadOptions): RuntimeProvisioner.ProvisionResult {
+        if (RuntimeProvisioner.isPresent(runtimeRoot())) return RuntimeProvisioner.ProvisionResult.Ready
+        if (System.getenv(RUNTIME_OVERRIDE_ENV) != null) {
+            LOG.warn("$RUNTIME_OVERRIDE_ENV is set but runtime is missing at ${runtimeRoot()}")
+            return RuntimeProvisioner.ProvisionResult.Failed(RuntimeProvisioner.ProvisionReason.INCOMPLETE, runtimeRoot().toString())
+        }
+        return downloadRuntimeInternal(options)
     }
 
     /** 瘦身通用插件：按当前平台从资产地图下载运行时（SHA-256 校验 + 安全解压）。 */
-    private fun downloadRuntime(): Boolean {
+    private fun downloadRuntimeInternal(options: RuntimeProvisioner.DownloadOptions = RuntimeProvisioner.DownloadOptions()): RuntimeProvisioner.ProvisionResult {
         val override = com.deepseek.harness.idea.settings.DshSettingsState.getInstance().runtimeDownloadUrl
             ?.trim()?.takeIf { it.isNotEmpty() }
         val spec = RuntimeAssets.load(override)
-        val ok = RuntimeProvisioner.provision(runtimeRoot(), spec, pluginVersion())
-        if (!ok) LOG.warn("runtime download/provision failed for ${Platform.current().id} (base=${spec.baseUrl})")
-        return ok
+        val result = RuntimeProvisioner.provision(runtimeRoot(), spec, pluginVersion(), RuntimeProvisioner.HttpFetcher, options)
+        if (result !is RuntimeProvisioner.ProvisionResult.Ready) {
+            LOG.warn("runtime download/provision failed for ${Platform.current().id} (base=${spec.baseUrl})")
+        }
+        return result
+    }
+
+    /** 当前平台将下载的**完整资产文件 URL**（设置覆盖或默认 base + 资产文件名），无资产返回 null。 */
+    fun effectiveRuntimeDownloadUrl(): String? {
+        val override = com.deepseek.harness.idea.settings.DshSettingsState.getInstance().runtimeDownloadUrl
+            ?.trim()?.takeIf { it.isNotEmpty() }
+        return RuntimeAssets.load(override).urlFor(Platform.current(), pluginVersion())
+    }
+
+    /** 从本地已下载的运行时 zip 导入（离线，不联网）；存在同目录 `.sha256` 则一并校验。 */
+    fun provisionFromLocalZip(zip: java.nio.file.Path): RuntimeProvisioner.ProvisionResult {
+        val sidecar = zip.resolveSibling(zip.fileName.toString() + ".sha256")
+        val expectedSha = if (Files.isRegularFile(sidecar)) runCatching { Files.readString(sidecar).trim() }.getOrNull() else null
+        return RuntimeProvisioner.provisionFromLocal(zip, runtimeRoot(), expectedSha)
     }
 
     /** 运行期读取插件版本：来自构建期注入的 `dsh-build-info.properties`（无内部 API，见 build.gradle.kts generateBuildInfo）。 */

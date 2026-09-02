@@ -25,6 +25,9 @@ class DshSettingsState : PersistentStateComponent<DshSettingsState> {
     /** 高级：运行时下载地址（覆盖默认 GitHub Releases baseUrl；支持 {version} 占位符） */
     var runtimeDownloadUrl: String? = null
 
+    /** 高级：运行时下载读取超时（秒）；连接超时固定 60s。默认 600s，放宽以适配慢网络。 */
+    var runtimeDownloadTimeoutSeconds: Int = 600
+
     var logLevel: String = "info"
 
     override fun getState(): DshSettingsState = this

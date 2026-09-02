@@ -4,13 +4,20 @@ import com.deepseek.harness.idea.bridge.DshBridgeManager
 import com.deepseek.harness.idea.i18n.DshBundle
 import com.deepseek.harness.idea.runtime.DshHomeManager
 import com.deepseek.harness.idea.runtime.DshProcessManager
+import com.deepseek.harness.idea.runtime.RuntimeProvisioner
 import com.deepseek.harness.idea.settings.DshSettingsConfigurable
+import com.deepseek.harness.idea.settings.DshSettingsState
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.diagnostic.Logger
+import com.intellij.openapi.fileChooser.FileChooserDescriptor
+import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.options.ShowSettingsUtil
+import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.wm.ToolWindow
@@ -32,8 +39,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.function.Consumer
 import javax.swing.BoxLayout
+import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
+import javax.swing.JProgressBar
 import javax.swing.SwingConstants
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
@@ -80,6 +89,7 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
         private const val CARD_LOADING = "loading"
         private const val CARD_BROWSER = "browser"
         private const val CARD_ERROR = "error"
+        private const val CARD_PROVISION = "provision"
         const val TOOL_WINDOW_ID = "DeepSeek Harness"
 
         /** JBCefJSQuery 回传里标记"来自 dsh 弹窗的 API Key"的前缀（与一键发送结果区分）。 */
@@ -103,6 +113,12 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
     private val statusLabel = JBLabel(DshBundle.message("status.stopped"), SwingConstants.CENTER)
     private val errorLabel = JBLabel(" ", SwingConstants.CENTER)
     private val retryLabel = JBLabel("<html><a href='#'>${DshBundle.message("action.restart")}</a></html>", SwingConstants.CENTER)
+    private val provisionProgress = JProgressBar(0, 100).apply {
+        isStringPainted = true
+        value = 0
+        isIndeterminate = true
+    }
+    private val provisionStatusLabel = JBLabel(DshBundle.message("provision.status.connecting"), SwingConstants.CENTER)
 
     /** 日志面板（Step 5 FR-08.1），null = 未打开。 */
     private var logPanel: DshLogPanel? = null
@@ -128,6 +144,7 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
         add(buildPlaceholderCard(), CARD_PLACEHOLDER)
         add(buildLoadingCard(), CARD_LOADING)
         add(buildErrorCard(), CARD_ERROR)
+        add(buildProvisionCard(), CARD_PROVISION)
         Disposer.register(project, this)
         com.deepseek.harness.idea.runtime.DshLifecycleManager.getInstance().registerPanel(project.name, this)
         start()
@@ -146,10 +163,128 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
 
     private fun start() {
         val homeManager = DshHomeManager.getInstance()
-        if (!homeManager.hasRuntime()) {
+        // 快速路径：运行时已就绪 → 直接启动
+        if (RuntimeProvisioner.isPresent(homeManager.runtimeRoot())) {
+            bootstrap()
+            return
+        }
+        // DSH_IDEA_RUNTIME 显式指向但运行时缺失 → 报错（不联网下载）
+        if (System.getenv(DshHomeManager.RUNTIME_OVERRIDE_ENV) != null) {
             showError(DshBundle.message("error.runtimeMissing", DshHomeManager.RUNTIME_OVERRIDE_ENV))
             return
         }
+        // 慢速路径：后台下载运行时（进度条 + 可取消），不在 EDT 上阻塞
+        runProvisionTask(homeManager)
+    }
+
+    /** 后台任务：下载运行时并推进度；成功后继续启动流程，失败显示含完整 URL 的错误卡。 */
+    private fun runProvisionTask(homeManager: DshHomeManager) {
+        showCard(CARD_PROVISION)
+        val readSeconds = DshSettingsState.getInstance().runtimeDownloadTimeoutSeconds.coerceAtLeast(30)
+        val task = object : Task.Backgroundable(project, DshBundle.message("provision.progress.title"), true) {
+            override fun run(indicator: ProgressIndicator) {
+                val options = RuntimeProvisioner.DownloadOptions(
+                    connectTimeoutMs = RuntimeProvisioner.DownloadOptions().connectTimeoutMs,
+                    readTimeoutMs = readSeconds * 1000,
+                    progress = { done, total, assetName -> updateProvision(indicator, done, total, assetName) },
+                    cancelled = { indicator.isCanceled() },
+                )
+                val result = homeManager.ensureRuntimeProvisioned(options)
+                ApplicationManager.getApplication().invokeLater {
+                    when (result) {
+                        is RuntimeProvisioner.ProvisionResult.Ready -> {
+                            showCard(CARD_LOADING)
+                            bootstrap()
+                        }
+                        is RuntimeProvisioner.ProvisionResult.Failed -> showProvisionError(result)
+                    }
+                }
+            }
+
+            override fun onCancel() {
+                ApplicationManager.getApplication().invokeLater {
+                    provisionStatusLabel.text = DshBundle.message("provision.status.cancelled")
+                    provisionProgress.isIndeterminate = true
+                }
+            }
+        }
+        ProgressManager.getInstance().run(task)
+    }
+
+    /** 进度回调：更新 IDE 底栏 indicator + 面板内进度条（口径一致；总量未知则走 indeterminate）。 */
+    private fun updateProvision(indicator: ProgressIndicator, done: Long, total: Long, assetName: String) {
+        val pct = if (total > 0) (done.toDouble() / total * 100).toInt().coerceIn(0, 100) else 0
+        val mbText = if (total > 0) "%.1f / %.1f MB".format(done / 1e6, total / 1e6) else "%.1f MB".format(done / 1e6)
+        indicator.isIndeterminate = total <= 0
+        if (total > 0) indicator.fraction = done.toDouble() / total
+        indicator.text = DshBundle.message("provision.status.downloading", assetName, mbText)
+        ApplicationManager.getApplication().invokeLater {
+            provisionStatusLabel.text = DshBundle.message("provision.status.downloading", assetName, mbText)
+            if (total > 0) {
+                provisionProgress.isIndeterminate = false
+                provisionProgress.value = pct
+            } else {
+                provisionProgress.isIndeterminate = true
+            }
+        }
+    }
+
+    /** 下载失败：把失败原因 + 尝试的完整文件 URL 一并展示，并提供"选择本地 zip"入口。 */
+    private fun showProvisionError(result: RuntimeProvisioner.ProvisionResult.Failed) {
+        val url = result.assetUrl ?: DshHomeManager.getInstance().effectiveRuntimeDownloadUrl() ?: ""
+        val reason = when (result.reason) {
+            RuntimeProvisioner.ProvisionReason.BASE_EMPTY -> DshBundle.message("provision.error.baseEmpty")
+            RuntimeProvisioner.ProvisionReason.NO_ASSET -> DshBundle.message("provision.error.noAsset")
+            RuntimeProvisioner.ProvisionReason.CHECKSUM_UNREACHABLE -> DshBundle.message("provision.error.checksum")
+            RuntimeProvisioner.ProvisionReason.DOWNLOAD_FAILED -> DshBundle.message("provision.error.downloadFailed")
+            RuntimeProvisioner.ProvisionReason.SHA_MISMATCH -> DshBundle.message("provision.error.shaMismatch")
+            RuntimeProvisioner.ProvisionReason.EXTRACT_FAILED -> DshBundle.message("provision.error.extractFailed")
+            RuntimeProvisioner.ProvisionReason.INCOMPLETE -> DshBundle.message("provision.error.incomplete")
+            RuntimeProvisioner.ProvisionReason.CANCELLED -> DshBundle.message("provision.error.cancelled")
+            RuntimeProvisioner.ProvisionReason.LOCAL_INVALID -> DshBundle.message("provision.error.localInvalid")
+        }
+        val body = buildString {
+            append(reason)
+            if (url.isNotBlank()) append("<br><br>").append(DshBundle.message("provision.error.url", url))
+            val detail = result.detail
+            if (!detail.isNullOrBlank()) {
+                append("<br><br>").append(DshBundle.message("provision.error.detail", detail))
+            }
+            append("<br><br>").append(DshBundle.message("provision.error.hint"))
+        }
+        showError(body)
+    }
+
+    /** 打开文件选择器，导入本地运行时 zip（离线）；成功则继续启动流程。 */
+    private fun provisionLocalZip() {
+        val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptor(true, false, false, false, false, false)
+            .withTitle(DshBundle.message("settings.runtimeDownload.chooseLocal"))
+            .withFileFilter { it.extension?.equals("zip", ignoreCase = true) == true }
+        val file = com.intellij.openapi.fileChooser.FileChooserFactory.getInstance()
+            .createFileChooser(descriptor, project, null)
+            .choose(project, null).firstOrNull() ?: return
+        val zipPath = java.nio.file.Paths.get(file.path)
+        val task = object : Task.Backgroundable(project, DshBundle.message("provision.progress.title"), true) {
+            override fun run(indicator: ProgressIndicator) {
+                indicator.isIndeterminate = true
+                indicator.text = DshBundle.message("provision.status.localImport")
+                val result = DshHomeManager.getInstance().provisionFromLocalZip(zipPath)
+                ApplicationManager.getApplication().invokeLater {
+                    when (result) {
+                        is RuntimeProvisioner.ProvisionResult.Ready -> {
+                            showCard(CARD_LOADING)
+                            bootstrap()
+                        }
+                        is RuntimeProvisioner.ProvisionResult.Failed -> showProvisionError(result)
+                    }
+                }
+            }
+        }
+        ProgressManager.getInstance().run(task)
+    }
+
+    private fun bootstrap() {
+        val homeManager = DshHomeManager.getInstance()
         // Step 5 FR-02.6：并发上限 3
         if (!com.deepseek.harness.idea.runtime.DshRuntimeRegistry.getInstance()
                 .tryAcquire(project.name, this)
@@ -250,7 +385,11 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
     }
 
     fun restart() {
-        val manager = processManager ?: return
+        val manager = processManager ?: run {
+            // 尚未启动成功（如运行时下发失败）→ 重新走启动/下发流程
+            start()
+            return
+        }
         ApplicationManager.getApplication().executeOnPooledThread { manager.restart() }
     }
 
@@ -712,6 +851,14 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
         statusLabel
     )
 
+    private fun buildProvisionCard(): JComponent = columnCard(
+        JBLabel(DshBundle.message("toolwindow.placeholder.title"), SwingConstants.CENTER),
+        JBLabel(DshBundle.message("provision.status.downloadingTitle"), SwingConstants.CENTER),
+        provisionStatusLabel,
+        provisionProgress,
+        buildUseLocalZipButton()
+    )
+
     private fun buildErrorCard(): JComponent = columnCard(
         JBLabel(DshBundle.message("toolwindow.placeholder.title"), SwingConstants.CENTER),
         errorLabel,
@@ -719,8 +866,14 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
             addMouseListener(object : MouseAdapter() {
                 override fun mouseClicked(e: MouseEvent) = restart()
             })
-        }
+        },
+        buildUseLocalZipButton()
     )
+
+    private fun buildUseLocalZipButton(): JButton =
+        JButton(DshBundle.message("settings.runtimeDownload.chooseLocal")).apply {
+            addActionListener { provisionLocalZip() }
+        }
 
     private fun columnCard(vararg labels: JComponent): JPanel {
         val panel = JPanel().apply {
