@@ -2,7 +2,10 @@
 
 > 本文汇总 DeepSeek Harness IDEA 插件开发过程中的**实测环境事实、踩坑记录、dsh 行为结论**，
 > 供后续任务（Step 6 评审及之后的维护/升级）直接参考，避免重复调查。
-> 最后更新：2026-08-23（v0.1.3-dev：切换项目工作区根治/每项目隔离 DSH_HOME、dsh 0.1.1-rc.2 升级与回归、
+> 最后更新：2026-09-02（**v0.2.1**：运行时供应 UX + 下载可靠性——首次使用下载失败修复、
+> 连接池化 HTTP/2 HttpClient + 浏览器 UA + 超时配置 + 退避重试、工具窗口下载进度条（可取消）、
+> 设置页精确下载 URL 回显/一键复制/可配置超时/本地 zip 离线导入、错误卡失败 URL + 根因 + Restart）
+> 上次更新：2026-08-23（v0.1.3-dev：切换项目工作区根治/每项目隔离 DSH_HOME、dsh 0.1.1-rc.2 升级与回归、
 > 运行日志一键解释、方案C回退方案A、旧 session/投影缓存升级迁移、API Key 脱敏回显 + 全局生效同步）
 
 ---
@@ -128,6 +131,16 @@ src/main/resources/
 | 沙箱 spawn EPERM | npm/子进程 `spawn EPERM` | 沙箱禁管道 stdio；npm 用 `--ignore-scripts`（原生依赖预编译无需 postinstall），Node 子进程用 `stdio:'ignore'`+轮询端口 |
 | Gradle 缓存锁 | 见 §1 | `--no-daemon` + 杀残留 daemon |
 
+### v0.2.1（2026-09-02）首次使用运行时下载：失败修复 + 可靠性 + UX（发布条目）
+
+- 修复首次使用下载失败：临时文件父目录缺失 → `NoSuchFileException`；现**先创建父目录再写入**。
+- 下载更可靠：连接池化、HTTP/2 的 `java.net.http.HttpClient` + 浏览器 User-Agent + **60s 连接超时 +
+  可配置读超时 + 退避重试**；慢速/不稳定网络（如大陆访问 GitHub）也能成功。
+- 工具窗口下载进度条（connecting/verifying/downloading 三态）+ **取消**。
+- 设置页回显**当前平台精确下载 URL（到文件）** + 一键复制 + 可配置下载超时 +
+  **"Choose local runtime zip…" 本地 zip 离线导入**（内容校验 + SHA-256 对照 `.sha256` 侧车）。
+- 错误卡显示**失败的确切 URL + 底层原因 + Restart**。
+
 ### 2024.1 API 勘误（编译期验证）
 
 - 无 `com.intellij.util.json.JsonUtil` → 用 Gson（`com.google.gson.Gson`，平台自带）。**v0.1.1 起改为自研 `JsonCodec`**
@@ -162,6 +175,25 @@ src/main/resources/
 - `Notification` 内容版是 **4 参** `(groupId, title, content, type)`（3 参无内容）。
 - `AppLifecycleListener.appClosing()`（`applicationListeners` 注册）；`ProjectManagerListener.projectClosed(project)`。
 - PasswordSafe 241：`setPassword(CredentialAttributes, String?)` / `getPassword(...)`；旧三参不可用。
+
+### 2024.x "invalid plugin descriptor"（v0.2.1 实测定根因）
+
+- **现象**：IntelliJ **2024.3**（build 243）启动报
+  `File '...\plugins\deepseek-harness-idea\lib\instrumented-deepseek-harness-idea-0.2.1.jar' contains invalid plugin descriptor`，
+  插件侧边栏不显示；但**动态加载/"Loaded without restart" 完全正常**（dsh 进程、JCEF、工具窗口都跑了）。
+  `0.1.3` 在 2024.3 正常，`0.2.0/0.2.1` 均失败。
+- **根因（实锤，来自 idea.log 第 893–907 行堆栈）**：`<idea-plugin>` 里写了
+  `<icon>/icons/dsh-logo-512.png</icon>`。IntelliJ 2024.x（build 241–252）启动期的
+  `PluginDescriptorLoader` 用 `XmlReader.readRootElementChild` 解析 plugin.xml 时**只识别固定的根子元素集合**
+  （`id/name/category/version/description/change-notes/resource-bundle/product-descriptor/module/idea-version/vendor/…/depends/actions/include/…`），
+  **不认识 `<icon>`** → 落入 `else` 分支触发 `LOG.error("Unknown element: icon")`，而**启动期 `Logger.error` 会抛异常**，
+  被 `loadDescriptorFromJar` 的 `catch` 捕获 → `reportCannotLoad` → 判 "contains invalid plugin descriptor"。
+  - 2026.2（build 262+）的 XmlReader 识别 `<icon>`，故只在 2024.x 崩。
+- **修复**：**移除 plugin.xml 中的 `<icon>` 元素**。工具窗口/动作的 `icon="/icons/dsh-toolwindow.svg"`
+  是作用于子元素的属性（`extensions/toolWindow`、`actions/action`），不经过根子元素读取，**不受影响**。
+- 其余排查无果/排除项：jcef `<depends>`（移除与否均失败，非因）；description/change-notes 内容（非因）；
+  `<vendor url>`（2024.3 的 vendor case 支持 `url` 属性，非因）；jar 内容与 src 一致（非污染）；
+  `<version>`（gradle 注入，2024.3 支持该 case，非因）。
 
 ### 运行控制台一键解释（v0.1.3-dev，FR-11 实测/源码验证）
 
@@ -220,9 +252,12 @@ src/main/resources/
 
 - 链路（v0.2.0 起跨平台，`scripts/build-runtime.mjs`，任意主机，默认取当前主机 os/arch）：下载 Node 22.23.2（按平台选 `win-*.zip`/`darwin-*.tar.gz`/`linux-*.tar.gz`，SHA-256 从同版本 `SHASUMS256.txt` 校验）→ 归一化 `node/<nodeBin>` → npm 装 `@deepseek-ai/dsh@0.1.1-rc.2` 到 `dsh/` → 冒烟 → `--bundle` 产出 `build/runtime-<os>-<arch>.zip`（**zip 根直接 `node/`+`dsh/`**，排除源包与 npm 缓存）+ 同名 `.sha256` 侧车。
 - 分发：瘦身默认（thin）不把运行时打入插件 jar；`-Pthin=false` 时 `bundleRuntime` 把当前平台 zip 复制为 `build/plugin-runtime/runtime-bundle.zip` 作为插件资源（fat / 离线备选）。
-- 运行期自举（v0.2.0）：`DshHomeManager.hasRuntime()` → 本地缺失且无 `DSH_IDEA_RUNTIME` 时，fat 安装从插件资源解压，瘦身安装经 `RuntimeProvisioner` 按平台从 `runtime-assets.json` 资产地图下载 + `.sha256` 校验 + 安全解压（幂等；`unzip` 兼容顶层单目录前缀剥离 + zip-slip 防护）。
+- 运行期自举（v0.2.0 引入）：`DshHomeManager.hasRuntime()` → 本地缺失且无 `DSH_IDEA_RUNTIME` 时，fat 安装从插件资源解压；**瘦身默认不捆绑 ~93MB 运行时**，经 `RuntimeProvisioner` 按平台从 `runtime-assets.json` 资产地图下载 `runtime-<os>-<arch>.zip` + 同名 `.sha256`，**SHA-256 校验**后安全解压到 `<config>/dsh-idea/runtime/<DSH_VERSION>`（幂等；`unzip` 兼容顶层单目录前缀剥离 + zip-slip 防护），离线/升级复用。`DSH_IDEA_RUNTIME` env 或设置页 runtime-directory 可跳过下载；fat（`-Pthin=false`）直接 bundle、不下载。下载 URL 与超时可配置。
+- 下载可靠性（**v0.2.1 加固**）：连接池化、HTTP/2 的 `java.net.http.HttpClient` + 浏览器 User-Agent + **60s 连接超时 + 可配置读超时 + 退避重试**——慢速/不稳定网络（如大陆访问 GitHub）也能成功；首次使用下载失败（临时文件父目录缺失 → `NoSuchFileException`）已修复：**先建父目录再写文件**（v0.2.1）。
+- 下载 UX（**v0.2.1**）：工具窗口下载进度条（connecting/verifying/downloading）+ **取消**；错误卡显示**失败的确切 URL + 底层原因 + Restart**；设置页回显**当前平台精确下载 URL（到文件）** + 一键复制 + 可配置下载超时 + **"Choose local runtime zip…" 本地 zip 离线导入**（内容校验 + SHA-256 对照 `.sha256` 侧车）。
+- 发布现状注意：**macos-x64（Intel Mac）运行时无法在 GitHub-hosted runner 构建（Intel macOS 已退役）→ 不在发布资产中，该平台下载 URL 会 404，需在其他主机构建后补传**。
 - **跨 OS 原生依赖**：dsh 树含平台专属原生依赖（`@img/sharp-*`、`@koromix/koffi-*`、`node-addon-require-builtin-*`，被 dsh-subprocess-local/dsh-attachment-local/cordis-plugin-loader import），**不能跨平台共享一个 dsh 树**；运行时必须按目标 OS 生成。推荐 CI 矩阵在各目标 OS runner 构建；用 npm `--os/--cpu` 交叉仅作捷径（有变体不全风险）。
-- 插件包：瘦身约 1.8MB；fat 约 93–98MB（含压缩运行时）。
+- 插件包：瘦身约 1.8MB（不含运行时）；fat 约 93–98MB（含压缩运行时）。
 - Node 版本：**v22.23.2**（npmmirror/官方二进制镜像，SHA-256 校验）；dsh 固定 `@deepseek-ai/dsh@0.1.1-rc.2`。
 
 ---
@@ -235,7 +270,7 @@ src/main/resources/
 | 集成冒烟 | DshBootstrapSmokeTest(真实 dsh 启动 + workspace 注册断言) / DshMcpBridgeSmokeTest(mock bridge + MCP tools/list 6 工具 + failOnStartupError 严格启动) / WorkspaceInitializerSmokeTest(切换项目工作区顺序) / **LegacySessionMigratorSmokeTest(v0.1.3-dev：zstd session 迁移后 workspace.json 自动挂接)** | 需 `DSH_IDEA_RUNTIME`，否则跳过 |
 
 - 冒烟测试注意：临时 DSH_HOME 内 dsh 自愈 junction 指向 runtime → **tearDown 必须先 unlinkJunctions 再让 `@TempDir` 清理**，否则清空 runtime（见 §4）。
-- 测试计数：**113 个**（截至 v0.2.0；109 单元 + 4 集成冒烟；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。
+- 测试计数：**122 个**（截至 v0.2.1，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），v0.2.1 新增用例未逐类复列——类覆盖以上表为准，**当前总数以 122 为准**。
 
 ---
 
@@ -245,10 +280,10 @@ src/main/resources/
    遗留问题 A（手工验收 5 项）/B（功能缺口）/C（技术债）/D（文档债）分级、PRD §9 风险回顾、v0.6/v0.7/v1.x 规划。
 2. **v0.6 验收闭环**（next）：PRD §7 手工验收项（见 docs/ACCEPTANCE.md 与 MILESTONE_REVIEW §3-A）——
    安装 zip、真实 API Key 对话、DiffManager UI、JCEF 注入效果、进程清理端到端——需真实 IDE 会话人工确认；
-   另含 B-1"发送当前文件"动作、C-6 杀软白名单文档、C-5 版本号对齐。
+   另含 B-1"发送当前文件"动作、C-6 杀软白名单文档（**C-5 版本号对齐已于 v0.2.0/v0.2.1 发版完成，当前插件版本 0.2.1**）。
 3. **已知改进项**（MILESTONE_REVIEW §3-B/C 明细）：
    - `org.jetbrains.intellij` 1.17.4 → 2.x（`org.jetbrains.intellij.platform`）升级（C-1）。
-   - dsh 版本升级：改 `DshHomeManager.DSH_VERSION` + 重建运行时（build-runtime.ps1 参数化）+ 回归 Step 3 patch 语法（C-2）。
+   - dsh 版本升级：改 `DshHomeManager.DSH_VERSION` + 重建运行时（重建脚本现已改用 `scripts/build-runtime.mjs` 参数化，见 §5；build-runtime.ps1 已弃用）+ 回归 Step 3 patch 语法（C-2）。
    - 多项目并发 3 上限后续可优化为单实例多工作区（C-3）。
    - `ide_open_file`/`ide_reveal_file` 目前实现为"打开"，项目树定位（reveal）可再增强（B-3）。
    - MCP patch 的 `failOnStartupError` 仅测试形态；生产可用 `reconnect` 语义（C-4）。
