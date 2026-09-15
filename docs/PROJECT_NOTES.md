@@ -2,7 +2,9 @@
 
 > 本文汇总 DeepSeek Harness IDEA 插件开发过程中的**实测环境事实、踩坑记录、dsh 行为结论**，
 > 供后续任务（Step 6 评审及之后的维护/升级）直接参考，避免重复调查。
-> 最后更新：2026-09-02（**v0.2.1**：运行时供应 UX + 下载可靠性——首次使用下载失败修复、
+> 最后更新：2026-09-15（**dsh 0.1.5-rc.2 升级**，插件版本 **0.2.3**：启动 URL 浏览器鉴权 token（`?token=` → cookie）+
+> RPC 命名空间/信封/参数三处变更（`workspace/list` 已移除）；前端 composer 由 `<textarea>` 改 Lexical contenteditable（注入待适配））
+> 上次更新：2026-09-02（**v0.2.1**：运行时供应 UX + 下载可靠性——首次使用下载失败修复、
 > 连接池化 HTTP/2 HttpClient + 浏览器 UA + 超时配置 + 退避重试、工具窗口下载进度条（可取消）、
 > 设置页精确下载 URL 回显/一键复制/可配置超时/本地 zip 离线导入、错误卡失败 URL + 根因 + Restart）
 > 上次更新：2026-08-23（v0.1.3-dev：切换项目工作区根治/每项目隔离 DSH_HOME、dsh 0.1.1-rc.2 升级与回归、
@@ -21,7 +23,7 @@
 | 运行时开发目录 | `tooling/runtime-dev`（`DSH_IDEA_RUNTIME` 指向它）；`build/runtime` 是构建产物（含 bundle） |
 | 自动化沙箱 | pwsh 沙箱拦截工作区外读写与部分出站网络 → **gradle/npm 命令需完整沙箱权限**（仅自动化环境；用户本机无此限制） |
 | 一键打包 | `scripts/build-plugin.bat`（双击；自动探测 JBR/Gradle 缓存，`--no-daemon`，输出产物路径） |
-| 版本号 | 插件版本 = `build.gradle.kts` 第 13 行 `version`；`DshHomeManager.DSH_VERSION`（= dsh 运行时版本 `0.1.1-rc.2`，决定生产运行时目录名；勿随意改，升级=重建运行时） |
+| 版本号 | 插件版本 = `build.gradle.kts` 第 13 行 `version`；`DshHomeManager.DSH_VERSION`（= dsh 运行时版本 `0.1.5-rc.2`，决定生产运行时目录名；勿随意改，升级=重建运行时） |
 | 前向编译检查 | `tooling\gradle-8.14\bin\gradle.bat compileKotlin --no-daemon -PplatformVersion=2026.2`（下载 ideaIC 2026.2 约 1.5GB 到 Gradle 缓存；新平台自带 Kotlin 模块 metadata 高于 2.0.21，已加 `-Xskip-metadata-version-check`；JCEF 自 2026.2 起拆分为内置插件 `com.intellij.modules.jcef`，检查时需列入 `plugins`） |
 
 ### 常用命令（自动化环境需完整权限）
@@ -75,7 +77,8 @@ src/main/resources/
 
 ---
 
-## 3. dsh 行为事实（0.1.1-rc.2 实测结论；早期 0.1.0-rc.7 结论经 0.1.1-rc.2 复验兼容）
+## 3. dsh 行为事实（0.1.1-rc.2 实测结论；启动/patch/RPC/鉴权已按 0.1.5-rc.2 复验并适配，其余条目待复验；
+> 早期 0.1.0-rc.7 结论经 0.1.1-rc.2 复验兼容）
 
 ### 3.1 启动与 patch
 
@@ -195,13 +198,80 @@ src/main/resources/
   `<vendor url>`（2024.3 的 vendor case 支持 `url` 属性，非因）；jar 内容与 src 一致（非污染）；
   `<version>`（gradle 注入，2024.3 支持该 case，非因）。
 
+### dsh 0.1.5-rc.2 升级（浏览器鉴权 + RPC 命名空间变更，实测定根因）
+
+- **现象**：升级后 4 个真实启动冒烟全部失败——`dsh did not reach RUNNING`，日志
+  `dsh health check timed out on port <p>`（dsh 已打印端口，但 HTTP 健康检查始终不通过）。
+- **根因 A：启动 URL 带浏览器鉴权 token（0.1.5 新增）**。启动行变为
+  `dsh web: http://127.0.0.1:<port>/?token=<t>`；实测 `GET /`（无 token）→ **401**，
+  `GET /?token=<t>` → **303 + `Set-Cookie: dsh-auth-<authority-hash>=v1.…`**，之后所有 `/api/*` 必须携带该 cookie
+  （`Authorization: Bearer <t>` 与 query token 均**不被接受**，实测 401）。
+  → 修复：`PortParser.parseUrl()` 解析完整 URL；`DshProcessManager` 保存 `launchUrl` 并让 JCEF / 健康检查 / `onUrlReady` 都用它；
+  健康检查禁止跟随重定向（303 视为就绪）并容忍 401；`WorkspaceInitializer` 先 `GET /?token=` 换取 cookie 再调 API。
+- **根因 B：RPC 契约三处变化（0.1.5）**：
+  - **命名空间**：方法名点号 → 斜杠（`workspace.create` → `workspace/create`；点号形式 RPC 层 404）。
+  - **信封**：`payload` 必须"恰好包含一个 plain-object `args`"（`{"payload":{"args":{…}}}`），否则报
+    `gateway/internal: Remote payload must contain exactly one plain-object args field`。
+  - **参数**：`args` 内还需按 descriptor 再包一层 `request`：`{"args":{"request":{"path":"…"}}}`，否则报
+    `gateway/arguments-invalid: args fields do not match the descriptor: missing "request"; unexpected "path"`。
+  - **方法集**：**`workspace/list` 已移除**（RPC 层 404）；工作区列表仅经流式 `workspace/follow` 下发。
+    实测 `workspace/create` 对**新建** workspace 会自动置顶，但**幂等 create（已存在）不改变顺序**，故"切回旧项目置顶"仍需 `insertBefore`。
+    顺序来源改为读 `DSH_HOME/storages/workspace.json`（**v2 结构**：`global.workspaceIds` + `tables.workspaces`，非旧版顶层 `workspaceIds`）。
+  → 修复：`WorkspaceInitializer`（`workspace/create`、`workspace/insertBefore` + 读文件定序）、`DshProcessManager` 传入 `homeDir`。
+- **前端 composer 变更（本次未适配，功能降级不崩溃）**：0.1.5 的 InputBar 不再渲染 `<textarea>`
+  （0.1.1 为 `jsx("textarea", { ref: inputRef, className: InputBar_module_css… })`），改为 Lexical
+  `contenteditable`（`data-lexical-editor="true"`）。插件注入仍按 `document.querySelector('textarea')` 定位，
+  故「发送选中代码」「运行日志一键解释」会走剪贴板兜底路径（有提示，需手动粘贴）。
+  适配方向：改走 contenteditable（`document.execCommand('insertText')` + Enter 派发），**须在真实 JCEF 页面验证后**再改。
+- 其余未变（实测）：`--profile web` / `--patch` / `--host` / `--port` / `--no-open` 启动参数、端口行前缀 `dsh web: `、
+  `lib/bin.js` 入口、profile bundle（`dsh-base` + `dsh-web-app`）、`welcomeNoticeVersion` 常量值 `2026-08-13.1`（与插件常量一致，无需改）。
+
+### FileChooser 隐藏 .zip（v0.2.3 实测：设置页"Choose local runtime zip…"看不到文件）
+
+- **现象**：设置页选本地运行时 zip 时，文件选择器**只显示文件夹、看不到任何 .zip**（用户截图）。
+- **根因（IDEA 2024.1 `app-client.jar` 字节码核实）**：`FileChooserDescriptor.isFileVisible` 对
+  `FileElement.isArchive(file)` 为真的文件（**`.zip` 属于归档**）有特判——
+  `if (isArchive && !myChooseJars && !myChooseJarContents) return false;`
+  即 **`chooseJars=false` 时归档文件直接不可见，与 `chooseFiles`、`withFileFilter` 都无关**
+  （filter 只在通过可见性后生效；`isFileSelectable` 才依赖 fileFilter）。
+- **修复**：构造 descriptor 时 `chooseJars = true`（`FileChooserDescriptor(true, false, true, false, false, false)`）；
+  并按用户要求**不做扩展名过滤**，显示所有类型文件（选中内容由 `provisionFromLocalZip` 做结构 + SHA-256 校验）。
+  两处导入入口都已改：设置页 `DshSettingsConfigurable` 与工具窗口错误卡 `DshToolWindowFactory.provisionLocalZip`。
+- 通用教训：任何"选 zip/jar 文件"的 FileChooser 都必须开 `chooseJars`，否则文件根本列不出来。
+- **后续实测（错误卡给了 `Cause: path=…; isRegularFile=false; exists=false`）**：文件选择器能列出并选中该 zip
+  （VFS 可见），但同一路径交给 NIO 时 `Files.exists=false`（该环境 NIO 看不到文件；远程/虚拟文件系统或安全软件拦截皆可能），
+  于是被误判为"不是有效的运行时 zip"。→ 新增 `RuntimeZipStaging.resolve(VirtualFile)`：**以 VFS 为准**——
+  优先用 `VfsUtilCore.virtualToIoFile` 的 io 路径，仍不可见时经 `file.inputStream` 复制到
+  `<config>/dsh-idea/imported-runtime.zip` 再导入；两处入口（工具窗口/设置页）统一走它。
+- 诊断增强：`provisionFromLocal` 的两条 LOCAL_INVALID 分支记录完整路径、`exists`/`size`，并作为 detail 显示在错误卡
+  （此前只有一句笼统提示）；本地导入失败不再显示 `Failed URL: <文件名>!`。
+- **设置页补齐「运行时目录」字段**（此前文档写了、代码没有）：`DshSettingsState.runtimeDirectory` +
+  `DshSettingsConfigurable` 的 `TextFieldWithBrowseButton`（目录选择器）；
+  `DshHomeManager.runtimeRoot()` 优先级 = **环境变量 `DSH_IDEA_RUNTIME` > 设置页运行时目录 > 默认下载目录**
+  （解析逻辑抽成纯函数 `resolveRuntimeRoot` 并有单测）；两者都属"显式指定"，内容缺失时报错、不回退下载
+  （`hasExplicitRuntimeRoot()`）。
+- 设置页地址/目录两行的**反显 + 「默认」按钮**（用户要求）：`Runtime download URL` 输入框反显**当前生效地址**
+  （未覆盖时 = 当前版本/平台的完整默认 URL），右侧「默认」按钮一键恢复；取值支持"目录级 base（可含 `{version}`）"与
+  "到文件的完整 URL（`.zip` 结尾）"两种形式（`RuntimeAssetSpec.urlFor` 对后者原样返回、不再拼接资产名）；
+  与默认等价的取值**不落盘**（`DshHomeManager.isDefaultRuntimeDownloadUrl` 判定，保存 null，避免把版本/平台钉死）。
+  `Runtime directory` 同样带「默认」按钮（清空 = 走默认下载/缓存目录）。原"单独一行只读 URL 回显 + Copy"已移除。
+- 续（用户要求）：`Runtime directory` 的「默认」按钮改为**填入完整的默认目录路径**（`<config>/dsh-idea/runtime/<DSH_VERSION>`），
+  与输入框初值/revert 保持一致；同时把"填入默认目录"定义为**与未指定等价**——
+  `DshHomeManager.isDefaultRuntimeDirectory()`（`samePath` 规范化比较，忽略分隔符/大小写/尾点）+ `hasExplicitRuntimeRoot()`
+  排除默认值 + `apply` 不落盘默认值，从而不会掉进"显式指定但目录为空 → 不下载"的死角。
+- 旁证：同一个 `build/runtime-win-x64.zip` 在 JDK 17 与 JBR 21 下均能正常打开（31311 条目、`node/node.exe` 与
+  `dsh/…/bin.js` 齐备），即 zip 内容无问题——问题只在"插件进程如何拿到这个文件"。
+- 同屏附带修复：工具窗口错误卡文案里的 `<br>` 被 `showError` 的 `escapeHtml` 转义成字面文本（用户截图中可见
+  `Runtime download cancelled.<br><br>Failed URL: …`）——现改为把转义后的 `&lt;br&gt;` 还原为 `<br>` 并同时渲染 `\n`。
+
 ### 运行控制台一键解释（v0.1.3-dev，FR-11 实测/源码验证）
 
 - **右键组 id**：Run 控制台右键菜单组是 **`ConsoleView.PopupMenu`**（不是 `ConsoleEditorPopupMenu`）。
   两版本源码核实：2024.1.7 `ConsoleViewImpl.java:93`（`CONSOLE_VIEW_POPUP_MENU = "ConsoleView.PopupMenu"`）
   与 2026.2 `ConsoleViewImpl.kt:1668` 同值；弹窗经 `ContextMenuPopupHandler` 挂在控制台 editor 上，
   `CommonDataKeys.EDITOR`/`PROJECT` 可用，选中文本读 `editor.selectionModel.selectedText`。
-- **dsh composer 提交机制**（`dsh-client-ui-conversation/lib/client.js`，dsh 0.1.0-rc.7 实测 / 0.1.1-rc.2 复验）：
+- **dsh composer 提交机制**（`dsh-client-ui-conversation/lib/client.js`，dsh 0.1.0-rc.7 实测 / 0.1.1-rc.2 复验；
+  **0.1.5-rc.2 已变更**：composer 改为 Lexical contenteditable，`<textarea>` 定位失效——见上文 0.1.5 升级章节）：
   - composer 文本区即页面 `<textarea>`（`document.querySelector('textarea')`），React 受控，原生 setter + `input` 事件可驱动（现有注入已验证）；
   - `onKeyDown`：非 shift 的 Enter → `keyboard.arbitrate("enter") === "pass"` → `keyboard.submit(resolveSubmitMode(...))`；
     智能体忙时默认 `busyEnter=queue` → **消息入队仍送达**；`machineBusy` 时不会静默丢弃（提交后 composer 清空）；
@@ -250,7 +320,7 @@ src/main/resources/
 
 ## 5. 打包 / 运行时（Step 5 实测）
 
-- 链路（v0.2.0 起跨平台，`scripts/build-runtime.mjs`，任意主机，默认取当前主机 os/arch）：下载 Node 22.23.2（按平台选 `win-*.zip`/`darwin-*.tar.gz`/`linux-*.tar.gz`，SHA-256 从同版本 `SHASUMS256.txt` 校验）→ 归一化 `node/<nodeBin>` → npm 装 `@deepseek-ai/dsh@0.1.1-rc.2` 到 `dsh/` → 冒烟 → `--bundle` 产出 `build/runtime-<os>-<arch>.zip`（**zip 根直接 `node/`+`dsh/`**，排除源包与 npm 缓存）+ 同名 `.sha256` 侧车。
+- 链路（v0.2.0 起跨平台，`scripts/build-runtime.mjs`，任意主机，默认取当前主机 os/arch）：下载 Node 22.23.2（按平台选 `win-*.zip`/`darwin-*.tar.gz`/`linux-*.tar.gz`，SHA-256 从同版本 `SHASUMS256.txt` 校验）→ 归一化 `node/<nodeBin>` → npm 装 `@deepseek-ai/dsh@0.1.5-rc.2` 到 `dsh/` → 冒烟 → `--bundle` 产出 `build/runtime-<os>-<arch>.zip`（**zip 根直接 `node/`+`dsh/`**，排除源包与 npm 缓存）+ 同名 `.sha256` 侧车。
 - 分发：瘦身默认（thin）不把运行时打入插件 jar；`-Pthin=false` 时 `bundleRuntime` 把当前平台 zip 复制为 `build/plugin-runtime/runtime-bundle.zip` 作为插件资源（fat / 离线备选）。
 - 运行期自举（v0.2.0 引入）：`DshHomeManager.hasRuntime()` → 本地缺失且无 `DSH_IDEA_RUNTIME` 时，fat 安装从插件资源解压；**瘦身默认不捆绑 ~93MB 运行时**，经 `RuntimeProvisioner` 按平台从 `runtime-assets.json` 资产地图下载 `runtime-<os>-<arch>.zip` + 同名 `.sha256`，**SHA-256 校验**后安全解压到 `<config>/dsh-idea/runtime/<DSH_VERSION>`（幂等；`unzip` 兼容顶层单目录前缀剥离 + zip-slip 防护），离线/升级复用。`DSH_IDEA_RUNTIME` env 或设置页 runtime-directory 可跳过下载；fat（`-Pthin=false`）直接 bundle、不下载。下载 URL 与超时可配置。
 - 下载可靠性（**v0.2.1 加固**）：连接池化、HTTP/2 的 `java.net.http.HttpClient` + 浏览器 User-Agent + **60s 连接超时 + 可配置读超时 + 退避重试**——慢速/不稳定网络（如大陆访问 GitHub）也能成功；首次使用下载失败（临时文件父目录缺失 → `NoSuchFileException`）已修复：**先建父目录再写文件**（v0.2.1）。
@@ -258,7 +328,18 @@ src/main/resources/
 - 发布现状注意：**macos-x64（Intel Mac）运行时无法在 GitHub-hosted runner 构建（Intel macOS 已退役）→ 不在发布资产中，该平台下载 URL 会 404，需在其他主机构建后补传**。
 - **跨 OS 原生依赖**：dsh 树含平台专属原生依赖（`@img/sharp-*`、`@koromix/koffi-*`、`node-addon-require-builtin-*`，被 dsh-subprocess-local/dsh-attachment-local/cordis-plugin-loader import），**不能跨平台共享一个 dsh 树**；运行时必须按目标 OS 生成。推荐 CI 矩阵在各目标 OS runner 构建；用 npm `--os/--cpu` 交叉仅作捷径（有变体不全风险）。
 - 插件包：瘦身约 1.8MB（不含运行时）；fat 约 93–98MB（含压缩运行时）。
-- Node 版本：**v22.23.2**（npmmirror/官方二进制镜像，SHA-256 校验）；dsh 固定 `@deepseek-ai/dsh@0.1.1-rc.2`。
+- 跨平台运行时（v0.2.3）：**五个平台资产已全部重建为 dsh 0.1.5-rc.2**（win-x64 103.8MB / macos-arm64 118.7MB /
+  macos-x64 120.7MB / linux-x64 126.0MB / linux-arm64 125.7MB，均含 `.sha256` 侧车，落在 `release-assets/`），
+  补齐了此前缺失的 **macos-x64**（Intel Mac，CI 无 runner）与 **linux-arm64**。
+  交叉构建（Windows 主机产出 Unix 运行时）由 `scripts/build-runtime.mjs` 支持，踩到并修掉三个坑：
+  ① Node Unix 包内 `bin/npm|npx|corepack` 是符号链接，Windows 创建需特权 → tar 失败时若 `bin/node` 已就位则继续；
+  ② 探测/npm/冒烟不能用目标平台 node（本机无法执行）→ 交叉时改用**主机** node + `--os/--cpu`；
+  ③ Linux 变体带 libc 后缀，交叉安装必须显式 `--libc glibc`，否则静默跳过 `*-linux-*-gnu`（实测包数 519→522、zip 118→126MB）。
+  打包命令按**主机**能力选择（Windows `tar -a` / Unix `zip`）。
+- IDE 版本边界验证（v0.2.3）：`since-build=241` / `until-build=262.*`；在 **2024.1.7（默认，含全部测试）**、
+  **2024.3.2**、**2026.2** 三处分别跑 `compileKotlin` + `compileTestKotlin` 均成功（`-PplatformVersion=X`
+  注意在 PowerShell 中需加引号，否则 `2026.2` 会被拆成两个参数报 `Task '.2' not found`）。
+- Node 版本：**v22.23.2**（npmmirror/官方二进制镜像，SHA-256 校验）；dsh 固定 `@deepseek-ai/dsh@0.1.5-rc.2`。
 
 ---
 

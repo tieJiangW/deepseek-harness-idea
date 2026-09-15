@@ -1,12 +1,12 @@
 # JetBrains Marketplace 上架填写草案
 
-> 上传 `build/distributions/deepseek-harness-idea-0.1.3.zip` 时按此填写。
+> 上传 `build/distributions/deepseek-harness-idea-0.2.1.zip` 时按此填写。
 > Name / Description / Change-notes 会自动从 plugin.xml 带入，此处为「额外字段」的建议值。
 
 ## 基本信息
 - **Plugin ID**: `com.deepseek.harness.idea` （自动带入）
 - **Name**: `DeepSeek Harness` （自动带入）
-- **Version**: `0.1.3` （自动带入）
+- **Version**: `0.2.1` （自动带入）
 - **Vendor**: `DeepSeek Harness Dev` （自动带入；已挂 `url=https://github.com/tieJiangW/deepseek-harness-idea`）
 
 ## 分类与标签
@@ -26,14 +26,16 @@
 情况：插件**不做任何遥测/统计**，不收集作者信息、不回传任何数据到插件作者。但：
 - 用户把 **DEEPSEEK_API_KEY** 填入插件设置（存本地 `%APPDATA%/../.dsh` 私有目录，不随插件上传）。
 - 走 DeepSeek API 时需要**联网**：用户在 IDE 里与智能体对话 / 发送选中代码时，**相关代码与对话内容会发送到 DeepSeek 的服务**（api.deepseek.com）用于推理。
-- 插件**捆绑** Node.js + DeepSeek Harness 运行时（均为 MIT 许可），首次使用本地解压，**不下载**运行时；无其它远程下载。
+- 默认**精简包（thin build）不捆绑运行时**：首次使用按当前平台（os/arch）从 GitHub Releases **下载** DeepSeek Harness 运行时（`runtime-<os>-<arch>.zip` + `.sha256`，SHA-256 校验通过后解压到本地、之后离线复用），下载 URL 与超时可在设置中查看/调整；另提供**捆绑运行时的 fat build**，供完全离线环境安装使用（不触发任何运行时下载）。
 
 ### 建议表单文案（英文，供粘贴）
 > This plugin does not collect any telemetry or usage data. It only reads your local
 > API key (stored locally, never uploaded) and, when you use the agent, sends the
 > relevant code/context to the DeepSeek API (api.deepseek.com) for inference. The
-> bundled runtime (Node.js + DeepSeek Harness) is extracted locally on first use —
-> nothing else is downloaded at runtime.
+> thin build downloads the per-platform runtime from GitHub Releases on first use
+> (SHA-256 verified, then cached locally for offline reuse); an optional fat bundle
+> pre-bundles the runtime for fully offline installs. Nothing is uploaded to the
+> plugin author.
 
 ## 截图建议（Screenshots，强烈建议 ≥2 张）
 1. 工具窗口聊天界面（对话中）

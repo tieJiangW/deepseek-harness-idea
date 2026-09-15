@@ -27,4 +27,25 @@ class PortParserTest {
         assertNull(PortParser.parsePort(""))
         assertNull(PortParser.parsePort("http://127.0.0.1:9999 without marker"))
     }
+
+    // ---- parseUrl：0.1.5 起启动 URL 带 ?token= 鉴权参数 ----
+
+    @Test
+    fun `parseUrl keeps auth token query`() {
+        val line = "dsh web: http://127.0.0.1:61664/?token=paYY-WbMDrAV0LdCB48gmgwKJJR6GY3738lP09dYHhM"
+        assertEquals(
+            "http://127.0.0.1:61664/?token=paYY-WbMDrAV0LdCB48gmgwKJJR6GY3738lP09dYHhM",
+            PortParser.parseUrl(line)
+        )
+    }
+
+    @Test
+    fun `parseUrl returns plain base for legacy lines and stops before lan suffix`() {
+        assertEquals("http://127.0.0.1:54451", PortParser.parseUrl("dsh web: http://127.0.0.1:54451"))
+        assertEquals(
+            "http://127.0.0.1:3080",
+            PortParser.parseUrl("dsh web: http://127.0.0.1:3080 (LAN: http://192.168.1.5:3080)")
+        )
+        assertNull(PortParser.parseUrl("node:internal/modules/cjs/loader:123"))
+    }
 }

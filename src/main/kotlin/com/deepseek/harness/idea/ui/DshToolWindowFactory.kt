@@ -231,7 +231,12 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
 
     /** 下载失败：把失败原因 + 尝试的完整文件 URL 一并展示，并提供"选择本地 zip"入口。 */
     private fun showProvisionError(result: RuntimeProvisioner.ProvisionResult.Failed) {
-        val url = result.assetUrl ?: DshHomeManager.getInstance().effectiveRuntimeDownloadUrl() ?: ""
+        // 本地导入失败（LOCAL_INVALID / SHA_MISMATCH）时 assetUrl 是所选文件名而非下载 URL，不显示 "Failed URL"。
+        val localFileCase = result.reason == RuntimeProvisioner.ProvisionReason.LOCAL_INVALID ||
+            result.reason == RuntimeProvisioner.ProvisionReason.SHA_MISMATCH
+        val url = if (localFileCase) "" else {
+            result.assetUrl ?: DshHomeManager.getInstance().effectiveRuntimeDownloadUrl() ?: ""
+        }
         val reason = when (result.reason) {
             RuntimeProvisioner.ProvisionReason.BASE_EMPTY -> DshBundle.message("provision.error.baseEmpty")
             RuntimeProvisioner.ProvisionReason.NO_ASSET -> DshBundle.message("provision.error.noAsset")
@@ -257,13 +262,22 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
 
     /** 打开文件选择器，导入本地运行时 zip（离线）；成功则继续启动流程。 */
     private fun provisionLocalZip() {
-        val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptor(true, false, false, false, false, false)
+        // 不做扩展名过滤（显示所有类型文件）；chooseJars=true 让 .zip/.jar 等归档文件也可见
+        // （IDEA 的 FileChooserDescriptor.isFileVisible 对归档文件有特判，chooseJars=false 时会直接隐藏）。
+        // 选中内容由 provisionFromLocalZip 做结构 + SHA-256 校验。
+        val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptor(true, false, true, false, false, false)
             .withTitle(DshBundle.message("settings.runtimeDownload.chooseLocal"))
-            .withFileFilter { it.extension?.equals("zip", ignoreCase = true) == true }
         val file = com.intellij.openapi.fileChooser.FileChooserFactory.getInstance()
             .createFileChooser(descriptor, project, null)
             .choose(project, null).firstOrNull() ?: return
-        val zipPath = java.nio.file.Paths.get(file.path)
+        // 路径解析以 VFS 为准（选中的文件一定可由 VFS 读；NIO 在个别环境下可能看不到，
+        // 见 RuntimeZipStaging —— 必要时经 VFS 复制到 <config>/dsh-idea/imported-runtime.zip 再导入）。
+        val zipPath = com.deepseek.harness.idea.runtime.RuntimeZipStaging.resolve(file)
+        if (zipPath == null) {
+            showError(DshBundle.message("provision.error.localInvalid"))
+            return
+        }
+        LOG.info("local runtime zip chosen: $zipPath (vfs=${file.path}, local=${file.isInLocalFileSystem})")
         val task = object : Task.Backgroundable(project, DshBundle.message("provision.progress.title"), true) {
             override fun run(indicator: ProgressIndicator) {
                 indicator.isIndeterminate = true
@@ -832,7 +846,12 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
 
     private fun showError(message: String) {
         ApplicationManager.getApplication().invokeLater {
-            errorLabel.text = "<html>${escapeHtml(message)}</html>"
+            // 调用方在消息里用 `<br>` 表达换行（如 provision 错误卡）；escapeHtml 会把它们转义成字面文本，
+            // 这里把转义后的 `&lt;br&gt;` 还原为换行标签，并把真正的 `\n` 一并渲染（JBLabel 按 HTML 显示）。
+            val html = escapeHtml(message)
+                .replace("&lt;br&gt;", "<br>")
+                .replace("\n", "<br>")
+            errorLabel.text = "<html>$html</html>"
             cards.show(this, CARD_ERROR)
         }
     }

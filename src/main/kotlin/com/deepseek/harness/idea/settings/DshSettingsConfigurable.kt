@@ -6,10 +6,12 @@ import com.deepseek.harness.idea.runtime.DshHomeManager
 import com.deepseek.harness.idea.runtime.RuntimeProvisioner
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileChooser.FileChooserDescriptor
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.openapi.ui.ComboBox
+import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.FormBuilder
@@ -35,8 +37,8 @@ class DshSettingsConfigurable : SearchableConfigurable {
     private var baseUrlField: JBTextField? = null
     private var logLevelCombo: ComboBox<String>? = null
     private var runtimeDownloadField: JBTextField? = null
+    private var runtimeDirField: TextFieldWithBrowseButton? = null
     private var timeoutField: JBTextField? = null
-    private var effectiveUrlLabel: JBLabel? = null
     private var runtimeStatus: JBLabel? = null
     private var importStatus: JBLabel? = null
 
@@ -76,40 +78,64 @@ class DshSettingsConfigurable : SearchableConfigurable {
         }
         logLevelCombo = logLevel
 
-        // 平台兼容：运行时下载地址（覆盖默认 GitHub Releases baseUrl；{version} 占位符运行期替换）
-        val runtimeDownload = JBTextField(state.runtimeDownloadUrl.orEmpty()).apply { columns = 40 }
-        runtimeDownloadField = runtimeDownload
-
-        // 只读回显：当前平台将下载的完整资产文件 URL（到文件名）+ 一键复制
-        val urlLabel = JBLabel()
-        urlLabel.isOpaque = false
-        effectiveUrlLabel = urlLabel
-        refreshEffectiveUrl()
-        val copyButton = JButton(DshBundle.message("action.copy")).apply {
-            addActionListener {
-                val txt = computeEffectiveUrl()
-                if (txt.isNotBlank()) {
-                    try {
-                        java.awt.Toolkit.getDefaultToolkit().systemClipboard
-                            .setContents(java.awt.datatransfer.StringSelection(txt), null)
-                        runtimeStatus?.text = DshBundle.message("copy.done")
-                    } catch (e: Exception) {
-                        runtimeStatus?.text = " "
-                    }
-                }
-            }
+        // 运行时下载地址：**反显当前生效地址**（未覆盖时即默认的完整资产 URL，含当前版本/平台）；
+        // 编辑即视为覆盖（支持目录级 base、含 {version} 占位符，或直接到文件的完整 URL）；「默认」按钮恢复默认。
+        val defaultUrl = runCatching { DshHomeManager.getInstance().defaultRuntimeDownloadUrl() }.getOrNull().orEmpty()
+        val runtimeDownload = JBTextField(
+            state.runtimeDownloadUrl?.trim()?.takeIf { it.isNotEmpty() } ?: defaultUrl
+        ).apply {
+            columns = 40
+            toolTipText = DshBundle.message("settings.runtimeDownload.hint")
         }
-        val urlRow = JPanel(BorderLayout()).apply {
-            add(urlLabel, BorderLayout.CENTER)
-            add(copyButton, BorderLayout.EAST)
+        runtimeDownloadField = runtimeDownload
+        val defaultUrlButton = JButton(DshBundle.message("action.default")).apply {
+            addActionListener { runtimeDownload.text = defaultUrl }
+        }
+        val downloadRow = JPanel(BorderLayout()).apply {
+            add(runtimeDownload, BorderLayout.CENTER)
+            add(defaultUrlButton, BorderLayout.EAST)
+        }
+
+        // 运行时目录：等价于环境变量 DSH_IDEA_RUNTIME 的 GUI 版本（环境变量优先级更高）。
+        // 「默认」按钮填入插件的默认目录；"填入默认目录"与"未指定"等价
+        // （DshHomeManager.isDefaultRuntimeDirectory），因此仍会自动下载/解压供给。
+        val defaultDir = runCatching { DshHomeManager.getInstance().defaultRuntimeRoot().toString() }.getOrNull().orEmpty()
+        val runtimeDir = TextFieldWithBrowseButton().apply {
+            text = state.runtimeDirectory?.trim()?.takeIf { it.isNotEmpty() } ?: defaultDir
+            toolTipText = DshBundle.message("settings.runtimeDir.hint")
+            addBrowseFolderListener(
+                DshBundle.message("settings.runtimeDir.label"),
+                DshBundle.message("settings.runtimeDir.hint"),
+                null,
+                FileChooserDescriptorFactory.createSingleFolderDescriptor(),
+            )
+        }
+        runtimeDirField = runtimeDir
+        val defaultDirButton = JButton(DshBundle.message("action.default")).apply {
+            addActionListener { runtimeDir.text = defaultDir }
+        }
+        val runtimeDirRow = JPanel(BorderLayout()).apply {
+            add(runtimeDir, BorderLayout.CENTER)
+            add(defaultDirButton, BorderLayout.EAST)
         }
 
         // 选择本地已下载的运行时 zip（离线导入）
         val chooseLocalButton = JButton(DshBundle.message("settings.runtimeDownload.chooseLocal")).apply {
             addActionListener {
-                val descriptor = FileChooserDescriptor(true, false, false, false, false, false)
+                // 注意：IDEA 把 `.zip` 视为"归档"（FileElement.isArchive）；chooseJars=false 时
+                // FileChooserDescriptor.isFileVisible 会直接隐藏归档文件（与 chooseFiles / fileFilter 无关），
+                // 用户侧表现为"文件选择器里只看得到文件夹、看不到 zip"。
+                // 这里**不做扩展名过滤**（显示所有类型文件），仅用 chooseJars=true 保证 zip 可选；
+                // 选中的文件由 DshHomeManager.provisionFromLocalZip 做结构 + SHA-256 校验。
+                val descriptor = FileChooserDescriptor(
+                    /* chooseFiles = */ true,
+                    /* chooseFolders = */ false,
+                    /* chooseJars = */ true,
+                    /* chooseJarsAsFiles = */ false,
+                    /* chooseJarContents = */ false,
+                    /* chooseMultiple = */ false,
+                )
                     .withTitle(DshBundle.message("settings.runtimeDownload.chooseLocal"))
-                    .withFileFilter { it.extension?.equals("zip", ignoreCase = true) == true }
                 val file = FileChooserFactory.getInstance()
                     .createFileChooser(descriptor, null, null)
                     .choose(null as com.intellij.openapi.project.Project?)
@@ -117,13 +143,18 @@ class DshSettingsConfigurable : SearchableConfigurable {
                     ?: return@addActionListener
                 runtimeStatus?.text = "…"
                 ApplicationManager.getApplication().executeOnPooledThread {
-                    val result = DshHomeManager.getInstance().provisionFromLocalZip(java.nio.file.Paths.get(file.path))
+                    // 以 VFS 为准解析路径（NIO 在个别环境下看不到所选文件，见 RuntimeZipStaging）
+                    val zipPath = com.deepseek.harness.idea.runtime.RuntimeZipStaging.resolve(file)
+                    val result = if (zipPath == null) {
+                        RuntimeProvisioner.ProvisionResult.Failed(RuntimeProvisioner.ProvisionReason.LOCAL_INVALID, file.name)
+                    } else {
+                        DshHomeManager.getInstance().provisionFromLocalZip(zipPath)
+                    }
                     ApplicationManager.getApplication().invokeLater {
                         runtimeStatus?.text = when (result) {
                             is RuntimeProvisioner.ProvisionResult.Ready -> DshBundle.message("settings.runtimeDownload.localDone")
                             is RuntimeProvisioner.ProvisionResult.Failed -> DshBundle.message("settings.runtimeDownload.localFailed")
                         }
-                        refreshEffectiveUrl()
                     }
                 }
             }
@@ -165,8 +196,8 @@ class DshSettingsConfigurable : SearchableConfigurable {
             .addComponentToRightColumn(importButton)
             .addComponentToRightColumn(status)
             .addLabeledComponent(JBLabel(DshBundle.message("settings.logLevel.label")), logLevel, 1, false)
-            .addLabeledComponent(JBLabel(DshBundle.message("settings.runtimeDownload.label")), runtimeDownload, 1, false)
-            .addComponent(urlRow)
+            .addLabeledComponent(JBLabel(DshBundle.message("settings.runtimeDownload.label")), downloadRow, 1, false)
+            .addLabeledComponent(JBLabel(DshBundle.message("settings.runtimeDir.label")), runtimeDirRow, 1, false)
             .addComponent(localRow)
             .addLabeledComponent(JBLabel(DshBundle.message("settings.runtimeDownload.timeout.label")), timeout, 1, false)
             .addComponent(JBLabel(DshBundle.message("settings.apply.note")))
@@ -179,8 +210,16 @@ class DshSettingsConfigurable : SearchableConfigurable {
         val model = modelCombo?.selectedItem as? String
         val logLevel = logLevelCombo?.selectedItem as? String
         val timeout = timeoutField?.text?.trim()?.toIntOrNull() ?: state.runtimeDownloadTimeoutSeconds
+        // 下载地址：与"默认地址"等价的输入视为未覆盖（apply 时保存为 null）
+        val downloadText = runtimeDownloadField?.text?.trim().orEmpty()
+        val downloadOverride =
+            if (DshHomeManager.getInstance().isDefaultRuntimeDownloadUrl(downloadText)) "" else downloadText
+        // 运行时目录：与默认目录等价的输入视为未指定
+        val dirText = runtimeDirField?.text?.trim().orEmpty()
+        val dirOverride = if (DshHomeManager.getInstance().isDefaultRuntimeDirectory(dirText)) "" else dirText
         return state.model != model || state.baseUrl != baseUrlField?.text?.trim().orEmpty() ||
-            state.logLevel != logLevel || state.runtimeDownloadUrl?.trim().orEmpty() != runtimeDownloadField?.text?.trim().orEmpty() ||
+            state.logLevel != logLevel || state.runtimeDownloadUrl?.trim().orEmpty() != downloadOverride ||
+            state.runtimeDirectory?.trim().orEmpty() != dirOverride ||
             state.runtimeDownloadTimeoutSeconds != timeout || apiKeyChanged()
     }
 
@@ -197,10 +236,16 @@ class DshSettingsConfigurable : SearchableConfigurable {
         state.baseUrl = baseUrlField?.text?.trim()?.ifEmpty { "https://api.deepseek.com" }
             ?: "https://api.deepseek.com"
         state.logLevel = logLevelCombo?.selectedItem as? String ?: "info"
-        state.runtimeDownloadUrl = runtimeDownloadField?.text?.trim()?.takeIf { it.isNotEmpty() }
+        // 与默认地址等价的输入不落盘（保持"跟随默认"，避免把版本/平台钉死在配置里）
+        val downloadText = runtimeDownloadField?.text?.trim().orEmpty()
+        state.runtimeDownloadUrl =
+            if (DshHomeManager.getInstance().isDefaultRuntimeDownloadUrl(downloadText)) null else downloadText
+        // 与默认（插件自身的）运行时目录等价的输入不落盘：等价于"未指定"，仍会自动下载供给
+        val dirText = runtimeDirField?.text?.trim().orEmpty()
+        state.runtimeDirectory =
+            if (DshHomeManager.getInstance().isDefaultRuntimeDirectory(dirText)) null else dirText
         state.runtimeDownloadTimeoutSeconds =
             (timeoutField?.text?.trim()?.toIntOrNull() ?: state.runtimeDownloadTimeoutSeconds).coerceIn(30, 100_000)
-        refreshEffectiveUrl()
 
         // 仅当用户实际输入了新 key（而非脱敏回显原样）才写回，避免把脱敏串当 key 保存。
         val key = apiKeyField?.text?.trim().orEmpty()
@@ -219,22 +264,14 @@ class DshSettingsConfigurable : SearchableConfigurable {
         modelCombo?.selectedItem = state.model
         baseUrlField?.text = state.baseUrl
         logLevelCombo?.selectedItem = state.logLevel
-        runtimeDownloadField?.text = state.runtimeDownloadUrl.orEmpty()
+        runtimeDownloadField?.text = state.runtimeDownloadUrl?.trim()?.takeIf { it.isNotEmpty() }
+            ?: runCatching { DshHomeManager.getInstance().defaultRuntimeDownloadUrl() }.getOrNull().orEmpty()
+        runtimeDirField?.text = state.runtimeDirectory?.trim()?.takeIf { it.isNotEmpty() }
+            ?: runCatching { DshHomeManager.getInstance().defaultRuntimeRoot().toString() }.getOrNull().orEmpty()
         timeoutField?.text = state.runtimeDownloadTimeoutSeconds.toString()
         storedApiKey = readStoredApiKey()
         apiKeyField?.text = DshCredentials.maskApiKey(storedApiKey)
         importStatus?.text = " "
-        refreshEffectiveUrl()
-    }
-
-    /** 当前平台将下载的完整资产文件 URL（到文件名）；无资产/无版本时回落到提示文案。 */
-    private fun computeEffectiveUrl(): String =
-        runCatching { DshHomeManager.getInstance().effectiveRuntimeDownloadUrl() }.getOrNull()
-            ?.takeIf { it.isNotBlank() } ?: DshBundle.message("settings.runtimeDownload.noEffectiveUrl")
-
-    /** 刷新设置页的只读 URL 回显。 */
-    private fun refreshEffectiveUrl() {
-        effectiveUrlLabel?.text = computeEffectiveUrl()
     }
 
     /**

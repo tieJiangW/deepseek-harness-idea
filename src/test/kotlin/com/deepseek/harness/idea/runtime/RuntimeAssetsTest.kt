@@ -35,6 +35,30 @@ class RuntimeAssetsTest {
     }
 
     @Test
+    fun `urlFor uses direct file url as-is`() {
+        val spec = RuntimeAssets.parse(
+            """{"baseUrl":"https://github.com/o/r/releases/download/v0.2.2/runtime-win-x64.zip","assets":{"win-x64":"runtime-win-x64.zip"}}"""
+        )
+        val target = Platform.Target(Platform.Os.WINDOWS, Platform.Arch.X64)
+        // 覆盖值已是"到文件的完整 URL" → 原样使用，不再拼接平台资产名
+        assertEquals(
+            "https://github.com/o/r/releases/download/v0.2.2/runtime-win-x64.zip",
+            spec.urlFor(target, "0.9.9")
+        )
+        assertEquals(
+            "https://github.com/o/r/releases/download/v0.2.2/runtime-win-x64.zip.sha256",
+            spec.shaUrlFor(target, "0.9.9")
+        )
+    }
+
+    @Test
+    fun `urlFor direct file url works even when platform has no asset entry`() {
+        val spec = RuntimeAssets.parse("""{"baseUrl":"file:///D:/rt/runtime-macos-x64.zip","assets":{}}""")
+        val target = Platform.Target(Platform.Os.WINDOWS, Platform.Arch.X64)
+        assertEquals("file:///D:/rt/runtime-macos-x64.zip", spec.urlFor(target, "0.2.2"))
+    }
+
+    @Test
     fun `assetName null when platform unsupported`() {
         val spec = RuntimeAssets.parse("""{"baseUrl":"x","assets":{"win-x64":"a.zip"}}""")
         val target = Platform.Target(Platform.Os.MACOS, Platform.Arch.ARM64)

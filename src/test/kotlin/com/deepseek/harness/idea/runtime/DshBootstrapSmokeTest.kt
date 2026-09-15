@@ -113,7 +113,8 @@ class DshBootstrapSmokeTest {
         assertEquals(DshProcessManager.State.RUNNING, manager?.currentState(), "dsh did not reach RUNNING")
         val webUrl = url ?: manager?.webUrl()
         assertTrue(webUrl != null, "web url not discovered")
-        assertEquals(200, httpStatus(webUrl!!), "web ui should answer 200 at $webUrl")
+        // 0.1.5：启动 URL 带 ?token=，首次 GET 返回 303（换取鉴权 cookie 的重定向）→ 接受 2xx/3xx
+        assertTrue(httpStatus(webUrl!!) in 200..399, "web ui should answer 2xx/3xx at $webUrl")
 
         // FR-04.2：等待 workspace.create 落地（异步），项目应注册为默认工作区
         val wsFile = home.resolve("storages/workspace.json")
@@ -134,6 +135,7 @@ class DshBootstrapSmokeTest {
         conn.connectTimeout = 5000
         conn.readTimeout = 5000
         conn.requestMethod = "GET"
+        conn.instanceFollowRedirects = false
         try {
             return conn.responseCode
         } finally {

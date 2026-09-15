@@ -182,7 +182,8 @@ class DshMcpBridgeSmokeTest {
 
         val webUrl = waitForDshWeb(dshProc, home)
         assertTrue(webUrl != null, "dsh web should boot with strict mcp patch (failOnStartupError)")
-        assertEquals(200, httpStatus(webUrl!!), "web ui should answer 200")
+        // 0.1.5：启动 URL 带 ?token=，首个 GET 返回 303（换取鉴权 cookie 的重定向）→ 接受 2xx/3xx
+        assertTrue(httpStatus(webUrl!!) in 200..399, "web ui should answer 2xx/3xx")
     }
 
     // ---- 辅助 ----
@@ -220,16 +221,16 @@ class DshMcpBridgeSmokeTest {
         throw AssertionError("mcp-ide-server no port line; log:\n$buffer")
     }
 
-    /** 等待 dsh web 端口行（最多 60s），返回 URL 或 null。 */
+    /** 等待 dsh web 启动行（最多 60s），返回完整启动 URL（0.1.5 起含 `?token=`）或 null。 */
     private fun waitForDshWeb(proc: Process, home: Path): String? {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60)
-        val re = Regex("""dsh web: http://127\.0\.0\.1:(\d+)""")
+        val re = Regex("""dsh web: (http://127\.0\.0\.1:\d+\S*)""")
         val reader = proc.inputStream.bufferedReader()
         while (System.nanoTime() < deadline) {
             if (!proc.isAlive) return null
             while (reader.ready()) {
                 val line = reader.readLine() ?: return null
-                re.find(line)?.let { return "http://127.0.0.1:${it.groupValues[1]}" }
+                re.find(line)?.let { return it.groupValues[1].trimEnd('.', ',', ';', ')') }
             }
             Thread.sleep(300)
         }
@@ -292,6 +293,7 @@ class DshMcpBridgeSmokeTest {
         val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 5000
         conn.readTimeout = 5000
+        conn.instanceFollowRedirects = false
         try {
             return conn.responseCode
         } finally {

@@ -238,10 +238,19 @@ object RuntimeProvisioner {
      */
     fun provisionFromLocal(zip: Path, dest: Path, expectedSha: String? = null): ProvisionResult {
         if (!Files.isRegularFile(zip)) {
-            return ProvisionResult.Failed(ProvisionReason.LOCAL_INVALID, zip.fileName?.toString())
+            LOG.warn("local runtime zip is not a regular file: $zip (exists=${Files.exists(zip)})")
+            return ProvisionResult.Failed(
+                ProvisionReason.LOCAL_INVALID, zip.fileName?.toString(),
+                "path=$zip; isRegularFile=false; exists=${Files.exists(zip)}"
+            )
         }
         if (!RuntimeArchive.validateRuntimeZip(zip)) {
-            return ProvisionResult.Failed(ProvisionReason.LOCAL_INVALID, zip.fileName?.toString())
+            val size = runCatching { Files.size(zip) }.getOrElse { -1L }
+            LOG.warn("local runtime zip failed structure validation: $zip (size=$size)")
+            return ProvisionResult.Failed(
+                ProvisionReason.LOCAL_INVALID, zip.fileName?.toString(),
+                "path=$zip; size=${size}B; 需要包含 node/${Platform.current().nodeBinName} 与 dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"
+            )
         }
         if (expectedSha != null && !RuntimeArchive.sha256(zip).equals(expectedSha.trim(), ignoreCase = true)) {
             LOG.warn("local runtime sha256 mismatch: expected $expectedSha")

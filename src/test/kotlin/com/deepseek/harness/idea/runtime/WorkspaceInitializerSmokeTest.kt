@@ -74,15 +74,15 @@ class WorkspaceInitializerSmokeTest {
         // 模拟项目 A 打开：注册 A
         val dirA = Files.createDirectory(tempDir.resolve("projA")).toFile().absolutePath
         val dirB = Files.createDirectory(tempDir.resolve("projB")).toFile().absolutePath
-        assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirA), "register workspace A")
+        assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirA, home), "register workspace A")
 
         // 模拟同窗口切换项目 B：注册 B 后 B 应挪到显示顺序最前
-        assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirB), "register workspace B")
+        assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirB, home), "register workspace B")
         awaitFirstWorkspace(home, dirB)
         assertEquals(canonical(dirB), firstWorkspacePath(home), "B should be first after switching to B")
 
         // 再切回 A：A 应回到最前（create 幂等 + insertBefore 重新排序）
-        assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirA), "re-register workspace A")
+        assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirA, home), "re-register workspace A")
         awaitFirstWorkspace(home, dirA)
         assertEquals(canonical(dirA), firstWorkspacePath(home), "A should be first after switching back to A")
     }

@@ -1,4 +1,4 @@
-# DeepSeek Harness IDEA 插件 — 项目文档
+ DeepSeek Harness IDEA 插件 — 项目文档
 
 本仓库开发一个 IntelliJ IDEA 插件（类 Qoder）：在 IDE 内嵌入 DeepSeek Harness（DSH）Web UI，让智能体能读写当前项目文件、通过 MCP 调用 IDE 能力，并提供代码上下文发送与 diff 审查/还原等原生集成。
 
@@ -8,9 +8,9 @@
 |---|---|---|
 | [PRD.md](./PRD.md) | 规划需求文档：目标、用户故事、功能/非功能需求、验收标准、风险 | 草稿（随实现迭代更新） |
 | [DESIGN.md](./DESIGN.md) | 详设文档：架构、模块设计、接口契约、数据流、测试策略 | 草稿（随实现迭代更新） |
-| [ACCEPTANCE.md](./ACCEPTANCE.md) | PRD §7 验收清单走查（Step 5 执行，自动化 vs 手工项） | 维护中（90/90 自动化；手工项待真实 IDE 会话） |
+| [ACCEPTANCE.md](./ACCEPTANCE.md) | PRD §7 验收清单走查（Step 5 执行，自动化 vs 手工项） | 维护中（v0.2.1：122 项测试全部通过；手工项待真实 IDE 会话） |
 | [MILESTONE_REVIEW.md](./MILESTONE_REVIEW.md) | 里程碑评审（Step 6）：Step 0–5 总结、需求覆盖矩阵、遗留问题、风险回顾、后续规划 | ✅ 完成（2026-08-20 评审时点快照，最新状态见上方文档） |
-| [PROJECT_NOTES.md](./PROJECT_NOTES.md) | 项目知识库：本机构建环境、dsh 行为实测、踩坑记录、2024.1 API 勘误、后续任务参考 | 维护中（v0.1.3-dev） |
+| [PROJECT_NOTES.md](./PROJECT_NOTES.md) | 项目知识库：本机构建环境、dsh 行为实测、踩坑记录、2024.1 API 勘误、后续任务参考 | 维护中（v0.2.1，122 项测试全部通过） |
 
 ## 文档约定
 
@@ -52,6 +52,9 @@
 | 2026-08-23 | v0.1.3-dev | **设置页 API Key 脱敏回显**（用户要求"前 6 位 + 中间脱敏 + 后 6 位"）：`DshCredentials.maskApiKey(key)` 前 6 位 + `******` + 后 6 位（≤12 位整段脱敏）；`DshSettingsConfigurable` 回显脱敏串（改用 `JBTextField`，否则 `JBPasswordField` 渲染成掩码点看不到），`isModified`/`apply` 以"字段内容 ≠ 脱敏串"判定是否真改了 key，避免把脱敏串写回密码库。新增 DshCredentialsMaskTest 6 例 |
 | 2026-08-23 | v0.1.3-dev | **设置页回显兜底：凭据文件读取**（用户实测"改后仍为空"）：PasswordSafe 读不到 key 时回显为空。`DshCredentials.readApiKeyFromCredentialFile`（行级解析）+ `readApiKeyWithFallback`（先 PasswordSafe，无则回退插件全局凭据文件）；设置页 `readStoredApiKey()` 用它。DshCredentialsMaskTest 增至 10 例 |
 | 2026-08-23 | v0.1.3-dev | **dsh Web UI 改 API key 全局生效**（用户要求+选B）：去掉 `DshProcessManager` 注入的 `DEEPSEEK_API_KEY` 环境变量（dsh-credentials-local `inherited env wins` 遮蔽 Web UI 写入，且 `assertUnshadowed` 拒改）；新增 `DshCredentialsSync`（WatchService 监听各项目凭据文件，dsh Web UI 写 `version:1 + refs.DEEPSEEK_API_KEY` → 捕获 → 回写 PasswordSafe + 插件全局凭据文件）。方案B：当前 dsh 进程立即生效，其它项目下次启动/重启一致。新增 DshCredentialsSyncTest 6 例 |
+| 2026-09-02 | v0.2.1 | 首次使用运行时下载修复 + 下载可靠性/UX（v0.2.0+ 运行时供给模型：thin 构建不再捆绑 ~93MB 运行时，按平台从 GitHub Releases 下载 `runtime-<os>-<arch>.zip` + `.sha256`，SHA-256 校验后解压到 `<config>/dsh-idea/runtime/<DSH_VERSION>/` 复用；`DSH_IDEA_RUNTIME` 环境变量或设置页运行时目录字段可指向已解压运行时跳过下载；fat 构建 `-Pthin=false` 捆绑运行时、无需下载）：①修复全新安装首启下载失败——临时下载文件父目录不存在抛 NoSuchFileException（"download failed"/0 进度），下载前先创建目录再写入；②下载更可靠——基于 java.net.http.HttpClient 的连接池 + HTTP/2、浏览器 User-Agent、60s 连接超时、可配置读超时与退避重试（慢/不稳定网络如大陆访问 GitHub 首启下载也能成功）；③工具窗口内下载进度条 + 取消（connecting/verifying/downloading 状态、bytes/MB/s 速度）；④设置页回显当前平台运行时下载 URL（精确到文件）+ 一键复制、可配置下载超时、"Choose local runtime zip…" 导入已下载的运行时 zip（校验 + 对照 sidecar SHA-256）实现完全离线启动；⑤错误卡片显示失败 URL + 底层原因 + "Restart harness"。测试 122 项全部通过 |
+| 2026-09-15 | v0.2.3 | dsh 运行时升级 0.1.1-rc.2 → **0.1.5-rc.2**（用户要求）：改 `DshHomeManager.DSH_VERSION` + `build.gradle.kts` dshVersion + `build-runtime.mjs`/`build-runtime.ps1` 默认值；重建 win-x64 运行时（Node 22.23.2 + dsh 0.1.5-rc.2，103.8MB zip + SHA-256 侧车）。**0.1.5 契约变更与适配**：① 启动 URL 新增浏览器鉴权 token（`dsh web: http://127.0.0.1:<port>/?token=<t>`）——`GET /` 无 token 返回 401，`GET /?token=` 返回 303 + `Set-Cookie: dsh-auth-…`，此后所有 `/api` 请求必须携带该 cookie（`Authorization: Bearer` 与 query token 均不被接受）；修复：`PortParser.parseUrl` 解析完整 URL、`DshProcessManager` 保存 `launchUrl`（JCEF/onUrlReady 用带 token URL；健康检查禁跟随重定向、303/401 均视为已就绪）、`WorkspaceInitializer` 先换 cookie；② RPC 契约三变：命名空间点号→斜杠、信封 `payload.args`、参数再包 `request`（`{"payload":{"args":{"request":{…}}}}`）；③ `workspace/list` RPC 移除 → 置顶顺序改读 `storages/workspace.json`（v2 `global.workspaceIds`）。测试 **124 项全部通过（0 失败 / 0 跳过，含 4 个真实 dsh 冒烟）** |
+| 2026-09-15 | v0.2.3 | **跨平台运行时 + IDE 版本边界适配**（用户要求）：五个平台资产全部重建为 dsh 0.1.5-rc.2 —— win-x64 103.8MB / macos-arm64 118.7MB / **macos-x64 120.7MB（新增，Intel Mac，CI 无 runner）** / linux-x64 126.0MB / **linux-arm64 125.7MB（新增）**，均带 `.sha256` 侧车并同步到 `release-assets/`。`scripts/build-runtime.mjs` 现支持在 Windows 上交叉构建 Unix 运行时，过程中修掉三个坑：① Unix Node 包内 `bin/npm|npx|corepack` 是符号链接，Windows 创建需特权 → tar 失败时只要 `bin/node` 已解压则继续；② 探测/npm/冒烟不能用目标平台 node（本机无法执行）→ 交叉时改用主机 node + `--os/--cpu`；③ Linux 交叉安装必须 `--libc glibc`（原生构建交给 npm 自行判定，兼容 musl），否则静默跳过 `*-linux-*-gnu` 变体（包数 519→522、zip 118→126MB）；打包命令按主机能力选择（Windows `tar -a` / Unix `zip`）。**IDE 版本边界**：`since-build=241` / `until-build=262.*`，在 **2024.1.7**（含全部测试）、**2024.3.2**、**2026.2** 分别编译主代码 + 测试代码全部通过 |
 
 ## 实施进度
 
@@ -66,3 +69,4 @@
 | Step 6 | 里程碑评审（总结 / 遗留问题 / 后续规划） | ✅ 完成 |
 | v0.1.2 | 2026.2 JCEF 兼容修复 | ✅ 完成 |
 | v0.1.3-dev | 切换项目工作区根治（每项目独立 DSH_HOME）+ dsh 0.1.1-rc.2 升级回归 + 运行日志一键解释 + 旧 session/投影缓存升级迁移 + API Key 脱敏回显与 Web UI 全局生效 | ✅ 完成（90/90 测试） |
+| v0.2.1 | 运行时供给 UX + 下载可靠性（thin 构建首启按平台下载运行时 + SHA-256 校验、工具窗口进度条/取消、设置页下载 URL/超时/本地 zip 导入、错误卡片；详见变更记录） | ✅ 完成（122 项测试全部通过） |

@@ -25,6 +25,12 @@ class DshSettingsState : PersistentStateComponent<DshSettingsState> {
     /** 高级：运行时下载地址（覆盖默认 GitHub Releases baseUrl；支持 {version} 占位符） */
     var runtimeDownloadUrl: String? = null
 
+    /**
+     * 高级：手动指定的运行时目录（已解压、含 `node/` 与 `dsh/`）；null/空 = 使用默认下载/缓存目录。
+     * 等价于环境变量 `DSH_IDEA_RUNTIME` 的 GUI 版本；环境变量优先级更高（见 `DshHomeManager.runtimeRoot()`）。
+     */
+    var runtimeDirectory: String? = null
+
     /** 高级：运行时下载读取超时（秒）；连接超时固定 60s。默认 600s，放宽以适配慢网络。 */
     var runtimeDownloadTimeoutSeconds: Int = 600
 

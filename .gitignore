@@ -31,3 +31,6 @@ sessions/
 storages/
 /runtime/
 dsh-home*/
+
+# ---- 发布产物（各平台运行时 zip 约 100MB+，只随 GitHub Release 上传，不入库）----
+release-assets/

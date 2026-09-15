@@ -11,7 +11,7 @@ plugins {
 }
 
 group = "com.deepseek.harness"
-version = "0.2.2"
+version = "0.2.3"
 
 repositories {
     mavenCentral()
@@ -23,7 +23,7 @@ val platformVersion: String = providers.gradleProperty("platformVersion").getOrE
 // 瘦身默认（thin=true）：运行时不打进插件 jar，改为首次运行按平台下载（见 DshHomeManager/RuntimeProvisioner）。
 // `-Pthin=false` 时打包一个含当前主机平台运行时的 fat zip（离线/air-gapped 备选）。
 val thin: Boolean = providers.gradleProperty("thin").map { it.toBoolean() }.getOrElse(true)
-val dshVersion: String = "0.1.1-rc.2"
+val dshVersion: String = "0.1.5-rc.2"
 
 val hostOs: String = when {
     System.getProperty("os.name").lowercase().contains("win") -> "win"

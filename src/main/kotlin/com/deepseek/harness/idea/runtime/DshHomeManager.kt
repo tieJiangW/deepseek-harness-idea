@@ -27,7 +27,7 @@ class DshHomeManager : Disposable {
         private val LOG = Logger.getInstance(DshHomeManager::class.java)
 
         /** 固定 dsh 版本（升级 = 换版本 + 重建运行时，见 DESIGN §3.2） */
-        const val DSH_VERSION = "0.1.1-rc.2"
+        const val DSH_VERSION = "0.1.5-rc.2"
 
         /** 构建期注入的版本信息资源（generateBuildInfo 产出，供运行期读取插件版本，避免用内部 API）。 */
         const val BUILD_INFO_RESOURCE = "/dsh-build-info.properties"
@@ -51,12 +51,64 @@ class DshHomeManager : Disposable {
 
         /** dsh 内测声明 acknowledge 版本（与 dsh 源码 WELCOME_NOTICE_VERSION 一致；变化需同步）。 */
         const val WELCOME_NOTICE_VERSION = "2026-08-13.1"
+
+        /**
+         * 运行时根解析（纯逻辑，便于单测）：环境变量 > 设置页「运行时目录」> 默认目录，
+         * 且只有**确实存在的目录**才会被采用（无效值回落下一级）。
+         */
+        internal fun resolveRuntimeRoot(envDir: String?, configuredDir: String?, fallback: Path): Path {
+            fun existing(raw: String?): Path? {
+                val s = raw?.trim().orEmpty()
+                if (s.isEmpty()) return null
+                val p = runCatching { Path.of(s) }.getOrNull() ?: return null
+                return if (Files.isDirectory(p)) p else null
+            }
+            return existing(envDir) ?: existing(configuredDir) ?: fallback
+        }
+
+        /** 路径等价比较（纯逻辑）：规范化绝对路径后忽略大小写与分隔符差异（Windows 大小写不敏感）。 */
+        internal fun samePath(a: String?, b: String?): Boolean {
+            val x = a?.trim().orEmpty()
+            val y = b?.trim().orEmpty()
+            if (x.isEmpty() || y.isEmpty()) return x == y
+            fun norm(s: String): String? = runCatching {
+                Path.of(s).toAbsolutePath().normalize().toString().replace('\\', '/')
+            }.getOrNull()
+            val nx = norm(x) ?: return x.equals(y, ignoreCase = true)
+            val ny = norm(y) ?: return x.equals(y, ignoreCase = true)
+            return nx.equals(ny, ignoreCase = true)
+        }
     }
 
-    /** 运行时根目录（node/ + dsh/ 的父目录）。 */
+    /**
+     * 运行时根目录（node/ + dsh/ 的父目录）。优先级：
+     * 1. 环境变量 `DSH_IDEA_RUNTIME`（存在的目录）；
+     * 2. 设置页「运行时目录」（存在的目录，等价于环境变量的 GUI 版本）；
+     * 3. 默认 `<config>/dsh-idea/runtime/<DSH_VERSION>`（插件下载/解压目标）。
+     */
     fun runtimeRoot(): Path {
-        System.getenv(RUNTIME_OVERRIDE_ENV)?.takeIf { Files.isDirectory(Path.of(it)) }?.let { return Path.of(it) }
-        return PathManager.getConfigDir().resolve("dsh-idea").resolve("runtime").resolve(DSH_VERSION)
+        val configured = com.deepseek.harness.idea.settings.DshSettingsState.getInstance().runtimeDirectory
+        return resolveRuntimeRoot(System.getenv(RUNTIME_OVERRIDE_ENV), configured, defaultRuntimeRoot())
+    }
+
+    /** 插件的默认运行时目录（**下载/解压目标**，与用户是否指定无关）：`<config>/dsh-idea/runtime/<DSH_VERSION>`。 */
+    fun defaultRuntimeRoot(): Path =
+        PathManager.getConfigDir().resolve("dsh-idea").resolve("runtime").resolve(DSH_VERSION)
+
+    /** 给定文本是否等价于默认运行时目录（空串/空白同样视为等价"未指定"）。 */
+    fun isDefaultRuntimeDirectory(text: String?): Boolean =
+        text.isNullOrBlank() || samePath(text, defaultRuntimeRoot().toString())
+
+    /**
+     * 是否由用户**显式**指定了**非默认**的运行时目录（环境变量，或设置页填了默认目录以外的路径）：
+     * 显式指定但内容缺失时报错、不回退下载。注意"填的正是默认目录"与"未指定"等价 —— 该目录由插件
+     * 下载/解压管理，仍应自动供给（避免点「默认」后陷入"目录为空又不下载"）。
+     */
+    fun hasExplicitRuntimeRoot(): Boolean {
+        if (!System.getenv(RUNTIME_OVERRIDE_ENV).isNullOrBlank()) return true
+        val configured = com.deepseek.harness.idea.settings.DshSettingsState.getInstance().runtimeDirectory
+        if (configured.isNullOrBlank()) return false
+        return !isDefaultRuntimeDirectory(configured)
     }
 
     /** node 可执行文件（Windows=`node/node.exe`；Unix=`node/node`，构建期已归一化布局）。 */
@@ -72,7 +124,7 @@ class DshHomeManager : Disposable {
      */
     fun hasRuntime(): Boolean {
         if (RuntimeProvisioner.isPresent(runtimeRoot())) return true
-        if (System.getenv(RUNTIME_OVERRIDE_ENV) != null) return false // 覆盖显式指向但缺失 → 报错
+        if (hasExplicitRuntimeRoot()) return false // 显式指向但缺失 → 报错（不触发下载）
         return provisionBundledOrDownload()
     }
 
@@ -87,8 +139,8 @@ class DshHomeManager : Disposable {
      */
     fun ensureRuntimeProvisioned(options: RuntimeProvisioner.DownloadOptions): RuntimeProvisioner.ProvisionResult {
         if (RuntimeProvisioner.isPresent(runtimeRoot())) return RuntimeProvisioner.ProvisionResult.Ready
-        if (System.getenv(RUNTIME_OVERRIDE_ENV) != null) {
-            LOG.warn("$RUNTIME_OVERRIDE_ENV is set but runtime is missing at ${runtimeRoot()}")
+        if (hasExplicitRuntimeRoot()) {
+            LOG.warn("runtime directory is set explicitly (env/settings) but runtime is missing at ${runtimeRoot()}")
             return RuntimeProvisioner.ProvisionResult.Failed(RuntimeProvisioner.ProvisionReason.INCOMPLETE, runtimeRoot().toString())
         }
         return downloadRuntimeInternal(options)
@@ -104,6 +156,24 @@ class DshHomeManager : Disposable {
             LOG.warn("runtime download/provision failed for ${Platform.current().id} (base=${spec.baseUrl})")
         }
         return result
+    }
+
+    /** 默认（未被覆盖）的运行时下载 base URL 模板（含 `{version}` 占位符）。 */
+    fun defaultRuntimeBaseUrl(): String = RuntimeAssets.load(null).baseUrl
+
+    /** 默认下载地址：当前平台 + 当前插件版本的**完整资产 URL**（设置页反显与「默认」按钮用）。 */
+    fun defaultRuntimeDownloadUrl(): String? =
+        RuntimeAssets.load(null).urlFor(Platform.current(), pluginVersion())
+
+    /**
+     * 给定文本是否等价于"默认下载地址"（留空、默认 base 模板、或当前版本/平台的完整默认 URL）
+     * —— 等价时设置页视为**未覆盖**（保存为 null，跟随插件版本/平台动态变化）。
+     */
+    fun isDefaultRuntimeDownloadUrl(text: String?): Boolean {
+        val t = text?.trim().orEmpty()
+        if (t.isEmpty()) return true
+        if (t == defaultRuntimeBaseUrl()) return true
+        return t == defaultRuntimeDownloadUrl()
     }
 
     /** 当前平台将下载的**完整资产文件 URL**（设置覆盖或默认 base + 资产文件名），无资产返回 null。 */

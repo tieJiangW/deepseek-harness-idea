@@ -39,7 +39,7 @@ DeepSeek Harness（DSH）是一个以本地 Web UI（`dsh web`，默认 `http://
 - 不支持 Remote Development / JetBrains Gateway（MVP 检测到远程环境时提示不可用）。
 - 运行时在 macOS / Linux 上通过「首次运行按平台下载」提供（v0.2.0 起支持）；不保证离线环境的首次自举，可用 `DSH_IDEA_RUNTIME` / 内网镜像 / fat zip 覆盖。
 - 不做智能体修改的自动接受提交（审查面板默认"接受=丢弃快照"，不写回，因为 dsh 已直接写盘）。
-- 不发布到 JetBrains Marketplace（已上架 v0.1.3；v0.2.0 起为瘦身跨平台单包，符合 Marketplace 单版本单 zip 模型）。
+- 发布到 JetBrains Marketplace（"不发布"为 MVP 初期非目标，自 v0.1.3 上架后撤销；v0.2.0 起为瘦身跨平台单包，符合 Marketplace 单版本单 zip 模型；v0.2.1 已上传 update id 1159301，待审核）。
 
 ## 3. 用户画像与核心场景
 
@@ -56,7 +56,7 @@ DeepSeek Harness（DSH）是一个以本地 Web UI（`dsh web`，默认 `http://
 
 | 编号 | 角色 | 故事 | 验收标准 |
 |---|---|---|---|
-| US-01 | 开发者 | 作为 IDEA 用户，我安装插件并打开项目后，希望工具窗口直接显示可用的 DSH 界面 | 工具窗口可打开；无 Node/dsh 安装步骤；首次运行自动完成运行时解压 |
+| US-01 | 开发者 | 作为 IDEA 用户，我安装插件并打开项目后，希望工具窗口直接显示可用的 DSH 界面 | 工具窗口可打开；无 Node/dsh 安装步骤；首次运行自动下载、校验并解压运行时（thin 默认按平台下载一次，缓存后离线可用；v0.2.1 下载有进度/取消） |
 | US-02 | 开发者 | 作为 IDEA 用户，我希望在设置页配置 DeepSeek API Key 后即可使用 | 填写 Key 并应用后，新会话可正常发起对话；Key 缺失时界面给出明确提示并引导到设置页 |
 | US-03 | 开发者 | 作为 IDEA 用户，我希望把本机已有的 DeepSeek 凭据一键导入，避免重复输入 | 设置页"从本机导入"可读取 `DEEPSEEK_API_KEY` 并填入 |
 | US-04 | 开发者 | 作为 IDEA 用户，我希望智能体以当前项目目录为工作区读写文件 | 智能体可读取项目文件内容；新建文件出现在项目树；修改内容可从磁盘读到 |
@@ -78,7 +78,7 @@ DeepSeek Harness（DSH）是一个以本地 Web UI（`dsh web`，默认 `http://
 - FR-01.4 加载状态反馈：启动中（转圈 + 阶段文案）、失败（原因 + 引导）。
 
 ### FR-02 运行时自举与生命周期（P0）
-- FR-02.1 插件资源内置 Node.js（win-x64）与 DSH 运行时（含 dsh-home），首次使用解压到插件配置目录（幂等，带版本目录）。
+- FR-02.1 运行时按平台下载（v0.2.0 起 thin 默认）：插件**不内置**约 93MB 的运行时（含 Node.js 22.x 与 dsh-home），首次使用按当前平台经 `runtime-assets.json` 下载 `runtime-<os>-<arch>.zip`（+ `.sha256`），SHA-256 校验后解压到 `PathManager.getConfigDir()/dsh-idea/runtime/<version>/`（幂等、带版本目录），缓存后离线/升级复用；fat 构建（`-Pthin=false`）才把运行时打进插件资源（免下载）。下载 URL 与超时可在设置页配置；`DSH_IDEA_RUNTIME` 或设置页 runtime-directory 可跳过下载。v0.2.1 下载 UX：工具窗口下载进度条（connecting/verifying/downloading）+ 取消；设置页回显精确到文件的当前平台 URL + 一键复制 + "选择本地运行时 zip…"离线导入（校验 zip 与 `.sha256`）；失败错误卡显示失败 URL + 底层原因 + Restart。
 - FR-02.2 每项目一个 Node 实例：工具窗口首次打开时懒启动，项目关闭时终止，IDE 退出时兜底终止。
 - FR-02.3 启动命令：`node <dsh>/lib/bin.js --profile web --host 127.0.0.1 --port 0 --patch <ide.yml>`，cwd=项目根目录，env 注入 `DSH_HOME`。
 - FR-02.4 端口发现：解析 stdout 中 `dsh web: http://127.0.0.1:<port>`，随后 HTTP 健康检查，通过后通知 UI 加载。
@@ -142,10 +142,10 @@ DeepSeek Harness（DSH）是一个以本地 Web UI（`dsh web`，默认 `http://
 
 | 编号 | 类别 | 要求 |
 |---|---|---|
-| NFR-01 | 性能 | 首次解压后，工具窗口从打开到可对话 ≤ 15s（本地磁盘、正常机器）；Node 实例空闲内存可接受（dsh 正常水平）；UI 操作不阻塞 EDT |
+| NFR-01 | 性能 | 运行时就绪后（首次按平台下载并解压完成后的后续使用），工具窗口从打开到可对话 ≤ 15s（本地磁盘、正常机器）；首次下载约 93MB 运行时为一次性成本（v0.2.1 带进度/取消）；Node 实例空闲内存可接受（dsh 正常水平）；UI 操作不阻塞 EDT |
 | NFR-02 | 安全 | 所有服务仅绑定 127.0.0.1；MCP/Bridge 间使用随机 token；API Key 不落日志、不落插件源代码；不使用 `--host 0.0.0.0`（dsh 本身拒绝） |
 | NFR-03 | 可靠性 | 安装/解压幂等；崩溃可自动重启（退避）；项目关闭/IDE 退出无残留进程；磁盘写失败有明确报错 |
-| NFR-04 | 可维护性 | dsh 版本固定（`@deepseek-ai/dsh@0.1.1-rc.2`），升级=重建运行时；DSH_HOME 版本化目录便于升级；模块边界清晰（runtime/bridge/mcp/review/ui/settings 分离） |
+| NFR-04 | 可维护性 | dsh 版本固定（`@deepseek-ai/dsh@0.1.5-rc.2`），升级=重建运行时；DSH_HOME 版本化目录便于升级；模块边界清晰（runtime/bridge/mcp/review/ui/settings 分离） |
 | NFR-05 | 兼容性 | IntelliJ IDEA 2024.1 – 2026.2（Community/Ultimate，until 262.*）；Windows 10/11 x64、macOS（arm64/x64）、Linux x64；路径含空格/中文可用；JCEF 不可用有降级；运行时按平台解析（首次下载，缓存后离线可用，v0.2.0 起） |
 | NFR-06 | 可用性 | 关键失败（缺 Key、Node 缺失、端口异常、崩溃）均有中文+英文明确提示与恢复路径；不静默失败 |
 
@@ -168,20 +168,21 @@ MVP 成功标准：全新 IDEA 实例中，安装插件 zip → 配置 API Key �
 - Windows 10/11 x64、macOS（arm64/x64）、Linux x64；IntelliJ IDEA Community/Ultimate 2024.1 – 2026.2（until 262.*）。
 - 用户持有 DeepSeek API Key（`deepseek-chat` / `deepseek-reasoner` 可用）。
 - 构建机有网络（构建时下载 Node 与 dsh 依赖）；**运行时按平台解析**：首次使用需联网一次下载运行时（SHA-256 校验，缓存到配置目录后离线可用；离线可用 `DSH_IDEA_RUNTIME` / 内网镜像 / fat zip）。
-- dsh 版本固定 0.1.1-rc.2（与当前环境一致），其 Web UI 与 `--patch`/mcp-client 行为以该版本为准。
+- dsh 版本固定 0.1.5-rc.2（与当前环境一致），其 Web UI 与 `--patch`/mcp-client 行为以该版本为准。
 - 插件不修改用户本机已有的 DeepSeek 配置（独立 DSH_HOME），避免与浏览器版 dsh 互相干扰。
 
 ## 9. 风险与缓解
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 插件包体积 150-300MB | 分发/安装体验 | MVP 本地磁盘安装；上架 Marketplace 前评估体积上限，备选"首次启动下载" |
+| 插件包体积 150-300MB（fat 内置运行时） | 分发/安装体验 | v0.2.0 起缓解：thin 默认不打包运行时（插件 zip 小），首次使用按平台下载约 93MB 运行时（进度/取消/可配置 URL 与超时/本地 zip 离线导入）；已上架 Marketplace（v0.2.1 已上传，待审核） |
+| Intel Mac（macos-x64）运行时资产缺失 | GitHub-hosted runner 无 Intel macOS（已退役），`runtime-macos-x64.zip` 无法在 CI 构建、未随 release 发布 → Intel Mac 首次下载 404 | 另行在 Intel 主机构建并发布该资产前，Intel Mac 用户经 `DSH_IDEA_RUNTIME` / 设置页 runtime-directory / "选择本地运行时 zip…"离线导入规避；macOS arm64 不受影响 |
 | Web UI DOM 变化破坏 JS 注入 | "发送选中代码"体验降级 | 注入失败自动降级剪贴板；`ide_get_sent_selection` 工具始终可用兜底 |
 | cordis patch 语法随 dsh 版本演进 | MCP 注入失效 | 锁定 dsh 版本；DSH_HOME 版本化；升级时回归验证 Step 3 |
 | JCEF 兼容性（WebSocket/IME） | 聊天/中文输入异常 | "外部浏览器打开"按钮兜底；JCEF 版本随 IDE 更新 |
 | 多项目并发资源占用 | 内存/端口 | 每项目实例 + 并发上限 3 + 懒启动；后续可优化为单实例多工作区 |
 | 杀软拦截 node.exe | 启动失败 | 文档说明加白名单；日志可诊断；失败提示明确 |
-| dsh web UI 依赖最新前端构建 | 功能缺失 | 固定 dsh 版本并与当前 GUI 版本对齐（0.1.1-rc.2） |
+| dsh web UI 依赖最新前端构建 | 功能缺失 | 固定 dsh 版本并与当前 GUI 版本对齐（0.1.5-rc.2） |
 
 ## 10. 迭代规划与范围管理
 

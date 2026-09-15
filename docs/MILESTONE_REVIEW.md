@@ -2,7 +2,8 @@
 
 > **⚠️ 历史快照**：本文是 Step 6 里程碑评审（2026-08-20）时的记录，反映 Step 0–5 收官状态。
 > 其后的 **v0.1.1 / v0.1.2 / v0.1.3-dev**（每项目隔离 DSH_HOME、dsh 0.1.1-rc.2、运行日志一键解释、
-> 旧 session 迁移、API key 全局化等）已远超本快照。**最新实现与状态请以 [README.md](./README.md)、
+> 旧 session 迁移、API key 全局化等）与 **v0.2.0 / v0.2.1**（瘦身 + 按平台下载运行时模型、下载可靠性
+> 与 UX——当前插件版本 0.2.1，2026-09-02）均已远超本快照。**最新实现与状态请以 [README.md](./README.md)、
 > [DESIGN.md](./DESIGN.md)、[ACCEPTANCE.md](./ACCEPTANCE.md) 为准**；本文件仅作历史评审背景留存。
 
 | 项目 | 内容 |
@@ -71,7 +72,7 @@ US-01～US-10 均有对应实现；其中 US-01/02/04/06/07/10 的**最终体验
 | 远程开发/Gateway 支持 | ⚠️ 功能未做（符合）；但"检测远程环境并提示"也未实现（PRD §2.2 提及）→ 遗留 A-3 |
 | macOS/Linux | ✅ v0.2.0 已做（瘦身通用插件 + 首次运行按平台下载运行时，见 docs/release-runtime.md） |
 | 自动接受提交 | ✅ 未做（接受 = 丢弃快照，符合设计） |
-| Marketplace 上架 | ✅ 未做（本地 zip 安装；上架列为长期规划） |
+| Marketplace 上架 | ⏳ 进行中（快照时点：✅ 未做，本地 zip 安装；**v0.2.1 已上传 JetBrains Marketplace——update id 1159301，待审核**） |
 
 ## 3. 遗留问题清单
 
@@ -102,7 +103,7 @@ US-01～US-10 均有对应实现；其中 US-01/02/04/06/07/10 的**最终体验
 | C-2 | dsh 版本锁定 0.1.0-rc.7 | 升级 = 改 `DSH_VERSION` + 重建运行时 + 回归 Step 3 patch 语法（`insert:`/`failOnStartupError`） |
 | C-3 | 并发上限 3 → 单实例多工作区 | 多项目内存/端口优化方向；当前上限策略满足 MVP |
 | C-4 | `failOnStartupError` 仅测试形态 | 生产可用 `reconnect` 语义（patch 已含 reconnect maxAttempts 3） |
-| C-5 | 版本号口径不一致 | 插件产物版本 0.1.0（build.gradle.kts）vs 文档变更记录 v0.5.x；建议下一次发版前对齐（如 0.2.0） |
+| C-5 | 版本号口径不一致 | 插件产物版本 0.1.0（build.gradle.kts）vs 文档变更记录 v0.5.x；建议下一次发版前对齐（如 0.2.0）。**→ ✅ 已解决（v0.2.0 起按 0.2.x 发版对齐；当前插件版本 0.2.1，2026-09-02）** |
 | C-6 | 杀软白名单说明未成文 | PRD §9 提及"文档说明加白名单"；用户文档层缺失，可并入插件 description 或随 A-1 安装文档补充 |
 
 ### D. 文档债（本次评审发现，随本评审已修复）
@@ -116,12 +117,14 @@ US-01～US-10 均有对应实现；其中 US-01/02/04/06/07/10 的**最终体验
 
 ## 4. 质量数据（评审时点 vs 当前）
 
-> 评审时点（2026-08-20，Step 6）与 v0.1.1（Gson→JsonCodec）的数据如下；**截至 v0.1.3-dev，自动化测试已达 90/90**（见下方"当前"）。
+> 评审时点（2026-08-20，Step 6）与各后续版本的数据如下；**截至 v0.2.1（2026-09-02），自动化测试已达 122/122、全部通过（0 失败）**（见下方"当前"）。
 
 - **评审时点（2026-08-20，Step 6）**：自动化测试 **36/36**（Step 0–5）；构建产物 `deepseek-harness-idea-0.1.0.zip`（102,889,616 B ≈98.1MB）；含 runtime-bundle.zip（≈106.9MB 压缩，首次解压 ≈62s）。
 - **v0.1.1**：Gson→JsonCodec 变更，新增 JsonCodecTest 9 例，测试 36→**45**；`until-build` 251.*→262.*。
 - **v0.1.2**：2026.2 JCEF 兼容修复（plugin.xml 可选依赖 `com.intellij.modules.jcef`）；测试 45/45 复跑通过。
-- **v0.1.3-dev（当前）**：每项目独立 DSH_HOME/工作区根治、dsh 0.1.1-rc.2 升级回归、运行日志一键解释（FR-11）、旧 session/投影缓存升级迁移、API Key 脱敏回显 + Web UI 全局生效（方案B）；测试 **90/90**（86 单元 + 4 集成冒烟）；构建产物 `deepseek-harness-idea-0.1.2.zip`。
+- **v0.1.3-dev**：每项目独立 DSH_HOME/工作区根治、dsh 0.1.1-rc.2 升级回归、运行日志一键解释（FR-11）、旧 session/投影缓存升级迁移、API Key 脱敏回显 + Web UI 全局生效（方案B）；测试 **90/90**（86 单元 + 4 集成冒烟）；构建产物 `deepseek-harness-idea-0.1.2.zip`。
+- **v0.2.0**：运行时供应模型重构——瘦身默认不捆绑 ~93MB 运行时（插件 ≈1.8MB），首次使用按平台下载（`runtime-assets.json` → `runtime-<os>-<arch>.zip` + `.sha256` 校验 → 解压 `<config>/dsh-idea/runtime/<DSH_VERSION>`，离线/升级复用）；`DSH_IDEA_RUNTIME` / 设置页 runtime-directory 跳过下载；fat（`-Pthin=false`）仍 bundle（不下载）；macOS/Linux 支持（跨平台 `scripts/build-runtime.mjs`）；测试 **113**（109 单元 + 4 集成冒烟）。
+- **v0.2.1（2026-09-02，当前）**：修复首次使用下载失败（临时文件父目录缺失 → `NoSuchFileException`，先建目录再写）；连接池化 HTTP/2 `java.net.http.HttpClient` + 浏览器 UA + 60s 连接超时 + 可配置读超时 + 退避重试（慢速/不稳定网络可成功）；工具窗口下载进度条（可取消）；设置页精确 URL 回显 + 一键复制 + 可配置下载超时 + 本地 zip 离线导入（SHA-256 vs 侧车）；错误卡失败 URL + 根因 + Restart；测试 **122/122 全部通过（0 失败）**；构建产物 `deepseek-harness-idea-0.2.1.zip`；JetBrains Marketplace 已上传（update id 1159301），待审核。
 - **构建链**：JBR 21 必须；Gradle 8.14 `--no-daemon`（防缓存锁）；一键脚本 `scripts/build-plugin.bat`。
 - 运行时目录（`tooling/runtime-dev` 与 `build/runtime`）均完整（node + dsh 齐全，可离线构建）。
 
@@ -143,7 +146,7 @@ US-01～US-10 均有对应实现；其中 US-01/02/04/06/07/10 的**最终体验
 
 1. 真实 IDE 会话执行 PRD §7 手工验收 A-1～A-5（安装 zip → 真实 API Key 对话 → 建/改文件 → 审查还原 → 发送选中 → 进程清理）。
 2. 验收中发现的问题按"先更新文档再改代码"流程闭环。
-3. B-1 "发送当前文件"动作；C-6 杀软白名单用户文档；C-5 版本号对齐（0.2.0）。
+3. B-1 "发送当前文件"动作；C-6 杀软白名单用户文档；~~C-5 版本号对齐（0.2.0）~~ **✅ 已完成**（v0.2.0/v0.2.1 已发版，当前插件版本 0.2.1）。
 
 ### 中期（v0.7：架构与体验升级）
 
@@ -154,8 +157,8 @@ US-01～US-10 均有对应实现；其中 US-01/02/04/06/07/10 的**最终体验
 
 ### 长期（v1.x）
 
-- Marketplace 上架评估：体积上限、插件签名、更新通道（备选"首次启动下载运行时"缩包）。
-- 平台扩展：打包脚本参数化 macOS/Linux（架构已预留）。
+- Marketplace 上架评估：**✅ 已进入上架流程**（v0.2.1 上传 JetBrains Marketplace，update id 1159301，待审核）；体积上限问题经 v0.2.0 瘦身 + "首次启动下载运行时"（该备选方案已实现为默认 thin 模型）解除；插件签名仍待评估。
+- 平台扩展：**✅ 打包已参数化 macOS/Linux**（v0.2.0 起 `scripts/build-runtime.mjs`，任意主机按目标 os/arch 构建）；注意 **macos-x64（Intel Mac）无法在 GitHub-hosted runner 构建（Intel macOS 已退役）→ 发布资产缺席，需其他主机构建后补传**。
 - 体验扩展：JetBrains AI 风格内联补全/生成式重构（PRD §2.2 非目标，可重新评估）。
 
 ## 7. 评审结论

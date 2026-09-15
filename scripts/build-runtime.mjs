@@ -3,7 +3,7 @@
 //
 // 用法：
 //   node scripts/build-runtime.mjs [--os win32|darwin|linux] [--arch x64|arm64]
-//        [--node-version 22.23.2] [--dsh-version 0.1.1-rc.2]
+//        [--node-version 22.23.2] [--dsh-version 0.1.5-rc.2]
 //        [--output build/runtime-<os>-<arch>] [--registry <npm>] [--cache <dir>]
 //        [--bundle] [--force]
 //
@@ -35,7 +35,7 @@ function flag(name) { return args.includes('--' + name); }
 const osName = opt('os', process.platform);          // win32 | darwin | linux
 const arch = opt('arch', process.arch);               // x64 | arm64
 const nodeVersion = opt('node-version', '22.23.2');
-const dshVersion = opt('dsh-version', '0.1.1-rc.2');
+const dshVersion = opt('dsh-version', '0.1.5-rc.2');
 const output = opt('output', path.join(root, 'build', `runtime-${osId(osName)}-${arch}`));
 const registry = opt('registry', process.env.npm_config_registry || 'https://registry.npmmirror.com/');
 const cacheDir = opt('cache', path.join(output, '.npm-cache'));
@@ -64,6 +64,21 @@ const TARGETS = {
 const targetKey = `${osId(osName)}-${arch}`;
 const t = TARGETS[targetKey];
 if (!t) { console.error(`unsupported target: ${targetKey}`); process.exit(1); }
+
+// 交叉构建（主机平台 ≠ 目标平台）支持：目标平台的 node 二进制在本机**无法执行**，
+// 因此 Node 版本探测、npm install 与冒烟一律改用**主机** node（npm 的 --os/--cpu 负责按目标平台解析依赖）。
+const hostKey = `${osId(process.platform)}-${process.arch}`;
+const isCross = hostKey !== targetKey;
+const runnerNode = isCross ? process.execPath : null;
+function probeNode(exe) { sh(exe, ['-v']); }
+/** 主机自带的 npm-cli.js（交叉构建时替代目标 node 内置的 npm）。 */
+function hostNpmCli() {
+  const dir = path.dirname(process.execPath);
+  return [
+    path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),                // Windows（nvm / 官方 zip）
+    path.join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),    // Unix
+  ].find((p) => fs.existsSync(p));
+}
 
 function log(m) { console.log(`==> ${m}`); }
 function sha256(file) {
@@ -102,7 +117,7 @@ async function main() {
   // ---- 1. Node ----
   if (fs.existsSync(nodeExe) && !force) {
     log('Node exists, skip download');
-    sh(nodeExe, ['-v']);
+    probeNode(runnerNode ?? nodeExe);
   } else {
     const zipName = t.file(nodeVersion);
     const url = `${nodeMirror}/v${nodeVersion}/${zipName}`;
@@ -126,7 +141,17 @@ async function main() {
     const unpack = path.join(output, 'unpack');
     fs.rmSync(unpack, { recursive: true, force: true });
     fs.mkdirSync(unpack, { recursive: true });
-    sh('tar', archive.endsWith('.gz') ? ['-xzf', archive, '-C', unpack] : ['-xf', archive, '-C', unpack]);
+    const tarArgs = archive.endsWith('.gz') ? ['-xzf', archive, '-C', unpack] : ['-xf', archive, '-C', unpack];
+    try {
+      sh('tar', tarArgs);
+    } catch (e) {
+      // 交叉构建容错：在 Windows 上解压**Unix** Node 发行包时，`bin/npm`、`bin/npx`、`bin/corepack`
+      // 是符号链接，创建需要 SeCreateSymbolicLinkPrivilege（管理员/开发者模式），否则 tar 报错退出。
+      // 这些链接对运行时并非必需（npm-cli.js 由 node 直接执行），只要 `bin/node` 解压到位即可继续。
+      const unixNode = path.join(unpack, t.sub(nodeVersion), 'bin', 'node');
+      if (t.nodeBin === 'node.exe' || !fs.existsSync(unixNode)) throw e;
+      console.log('   warn: tar reported errors (unix symlinks cannot be created on Windows); bin/node present, continuing');
+    }
     const extracted = path.join(unpack, t.sub(nodeVersion));
     if (!fs.existsSync(extracted)) throw new Error(`extracted dir not found: ${extracted}`);
 
@@ -143,7 +168,7 @@ async function main() {
     fs.rmSync(unpack, { recursive: true, force: true });
     fs.rmSync(archive, { force: true });
     if (!fs.existsSync(nodeExe)) throw new Error(`node not found: ${nodeExe}`);
-    sh(nodeExe, ['-v']);
+    probeNode(runnerNode ?? nodeExe);
   }
 
   // ---- 2. dsh ----
@@ -156,25 +181,35 @@ async function main() {
     fs.rmSync(dshDir, { recursive: true, force: true });
     fs.mkdirSync(dshDir, { recursive: true });
     fs.writeFileSync(path.join(dshDir, 'package.json'), JSON.stringify({ name: 'dsh-runtime', private: true, dependencies: { '@deepseek-ai/dsh': dshVersion } }, null, 2));
-    const npmCli = path.join(nodeDir, t.npmRel);
-    if (!fs.existsSync(npmCli)) throw new Error(`bundled npm-cli.js missing: ${npmCli}`);
-    const npmArgs = [npmCli, 'install', '--ignore-scripts', '--no-audit', '--no-fund', '--cache', cacheDir, '--registry', registry, '--os', t.os, '--cpu', arch];
-    sh(nodeExe, npmArgs, { cwd: dshDir, env: { ...process.env, NODE_OPTIONS: '--max-old-space-size=4096' } });
+    const npmCli = isCross ? hostNpmCli() : path.join(nodeDir, t.npmRel);
+    if (!npmCli || !fs.existsSync(npmCli)) {
+      throw new Error(isCross
+        ? 'cross build requires a host npm (node_modules/npm/bin/npm-cli.js)'
+        : `bundled npm-cli.js missing: ${npmCli}`);
+    }
+    if (isCross) log(`cross build: installing with host node ${process.version} for target ${targetKey}`);
+    // Linux **交叉**安装必须显式指定 libc：主机不是 Linux 时 npm 无法推断目标 libc，会跳过
+    // `*-linux-*-gnu`（glibc）变体，导致运行时缺原生依赖（实测缺 @img/sharp-linux-x64 与
+    // node-addon-require-builtin-linux-x64-gnu）。原生 Linux 构建交给 npm 自行判定（兼容 musl）。
+    const libcArgs = (t.os === 'linux' && isCross) ? ['--libc', 'glibc'] : [];
+    const npmArgs = [npmCli, 'install', '--ignore-scripts', '--no-audit', '--no-fund', '--cache', cacheDir, '--registry', registry, '--os', t.os, '--cpu', arch, ...libcArgs];
+    sh(runnerNode ?? nodeExe, npmArgs, { cwd: dshDir, env: { ...process.env, NODE_OPTIONS: '--max-old-space-size=4096' } });
     if (!fs.existsSync(dshBin)) throw new Error(`dsh bin missing after install: ${dshBin}`);
   }
 
   // ---- 3. Smoke ----
   log('Smoke verification');
   const dshPkgDir = path.resolve(dshDir, 'node_modules/@deepseek-ai/dsh');
-  sh(nodeExe, ['-e', `const p=require(process.argv[1]+'/package.json');console.log('   dsh '+p.version);`, dshPkgDir]);
+  sh(runnerNode ?? nodeExe, ['-e', `const p=require(process.argv[1]+'/package.json');console.log('   dsh '+p.version);`, dshPkgDir]);
 
   // ---- 4. Bundle ----
   if (bundle) {
     log('Bundle runtime-' + targetKey + '.zip');
     fs.rmSync(bundleZip, { force: true });
-    // Windows: bsdtar 的 `-a` 能生成真正的 zip。GNU tar（linux/macOS 上的 /usr/bin/tar）的 `-a` 不认 .zip，
-    // 只会产出裸 tar（体积大且插件 ZipFile 打不开），故 unix 改用 `zip` 命令。
-    if (t.os === 'win32') {
+    // 打包命令按**主机**能力选择（交叉构建时 t.os 是目标平台，不能据此判断本机是否有 zip 命令）：
+    // - Windows/bsdtar：`tar -a` 能生成真正的 zip；
+    // - Unix (linux/macOS)：GNU tar 的 `-a` 不认 .zip（只会产出裸 tar），改用 `zip` 命令。
+    if (process.platform === 'win32') {
       sh('tar', ['-a', '-c', '-f', bundleZip, '--exclude', '*.zip', '--exclude', '.npm-cache', '-C', output, 'node', 'dsh']);
     } else {
       sh('zip', ['-r', '-q', bundleZip, 'node', 'dsh'], { cwd: output });

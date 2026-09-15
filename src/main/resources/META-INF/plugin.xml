@@ -110,6 +110,45 @@
 
     <change-notes><![CDATA[
         <h3>English / 中文</h3>
+        <h4>v0.2.3</h4>
+        <ul>
+            <li><b>Runtime upgraded to DeepSeek Harness 0.1.5-rc.2, with full integration adaptation.</b>
+            The bundled / auto-provisioned runtime now ships dsh 0.1.5-rc.2 (Node.js 22.23.2). dsh 0.1.5 changed three
+            contracts that this release adapts to: the launcher URL now carries a browser-auth token
+            (<code>?token=…</code>) and every <code>/api</code> call must present the cookie it issues; RPC methods moved
+            to a slash namespace with a <code>{"args":{"request":…}}</code> envelope; and <code>workspace/list</code> was
+            removed (workspace display order is now read from <code>storages/workspace.json</code>).</li>
+            <li><b>运行时升级到 DeepSeek Harness 0.1.5-rc.2，并完成全部集成适配。</b>随包 / 自动下发的运行时升级为
+            dsh 0.1.5-rc.2（Node.js 22.23.2）。dsh 0.1.5 有三处契约变更并已适配：启动地址新增浏览器鉴权 token
+            （<code>?token=…</code>），且所有 <code>/api</code> 调用需携带其下发的 cookie；RPC 改为斜杠命名空间并使用
+            <code>{"args":{"request":…}}</code> 信封；<code>workspace/list</code> 被移除（工作区显示顺序改读
+            <code>storages/workspace.json</code>）。</li>
+        </ul>
+        <ul>
+            <li><b>All five platform runtimes rebuilt; macOS x64 and Linux arm64 added.</b> Prebuilt runtimes for
+            Windows x64, macOS (arm64 / x64) and Linux (x64 / arm64) are published alongside this release
+            (<code>.zip</code> + <code>.sha256</code>). Intel Mac and Linux arm64 assets are available for the first time.</li>
+            <li><b>全部五个平台运行时重建，新增 macOS x64 与 Linux arm64。</b>随本版本发布 Windows x64、macOS
+            （arm64 / x64）与 Linux（x64 / arm64）的预构建运行时（<code>.zip</code> + <code>.sha256</code>）；
+            Intel Mac 与 Linux arm64 资产首次提供。</li>
+        </ul>
+        <ul>
+            <li><b>Settings improvements and a file-picker fix.</b> "Runtime download URL" now shows the currently
+            effective address and has a Default button; "Runtime directory" is a real setting now (its Default button
+            fills the plugin's own directory, which behaves exactly like leaving it unset). The local-runtime-zip picker
+            no longer hides <code>.zip</code> files, and importing works even when the chosen file is not reachable via a
+            plain filesystem path.</li>
+            <li><b>设置页改进与文件选择器修复。</b>"运行时下载地址"现反显当前生效地址并提供"默认"按钮；"运行时目录"成为
+            真正的设置项（其"默认"按钮填入插件自身目录，且与未设置完全等价）。本地运行时 zip 选择器不再隐藏
+            <code>.zip</code> 文件；且当所选文件无法通过常规文件系统路径访问时，导入依然可用。</li>
+        </ul>
+        <ul>
+            <li><b>Known limitation.</b> dsh 0.1.5 replaced the composer <code>&lt;textarea&gt;</code> with a Lexical
+            editor, so "Send selection" and "Explain log" currently fall back to the clipboard (with a notification)
+            until the JS injection is reworked.</li>
+            <li><b>已知限制。</b>dsh 0.1.5 将输入框由 <code>&lt;textarea&gt;</code> 改为 Lexical 编辑器，因此"发送选中代码"
+            与"日志一键解释"在完成注入适配前会降级为剪贴板（有提示）。</li>
+        </ul>
         <h4>v0.2.2</h4>
         <ul>
             <li><b>Fixed the plugin not loading on IntelliJ IDEA 2024.x.</b> Startup failed on 2024.x with

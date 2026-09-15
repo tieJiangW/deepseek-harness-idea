@@ -5,6 +5,8 @@ import com.intellij.openapi.diagnostic.Logger
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.UUID
 
 /**
@@ -12,14 +14,14 @@ import java.util.UUID
  *
  * dsh 的 workspace 是显式注册制：`storages/workspace.json` 没有记录时，UI 显示
  * "选择一个工作区开始"。插件在 dsh 健康检查通过后调用内部 RPC
- * `POST /api/workspace.create`（payload `{path}`）把项目根注册为工作区（幂等：
+ * `POST /api/workspace/create`（payload `{path}`）把项目根注册为工作区（幂等：
  * 同路径重复调用返回既有实体），使 UI 一打开即默认选中当前项目。
  *
  * **切换项目修复（v0.1.3-dev 实测）**：`workspace.create` 幂等、**不改变**注册表
  * 显示顺序（workspace.json `workspaceIds`）；UI 侧边栏/新建会话选择器按该顺序显示，
  * 默认落点 = 列表第一个 workspace。因此切换项目后新项目仍是既有实体时，UI 默认仍
  * 落在旧项目 → 新建会话绑定旧项目工作区。修复：create 成功后调用
- * `POST /api/workspace.insertBefore`（payload `{workspaceId, beforeWorkspaceId}`，
+ * `POST /api/workspace/insertBefore`（payload `{workspaceId, beforeWorkspaceId}`，
  * dsh 0.1.0-rc.7 已暴露该 RPC）把当前项目挪到列表最前。
  *
  * 实测（dsh 0.1.0-rc.7）：127.0.0.1 loopback 信任围栏放行，无需鉴权头。
@@ -32,20 +34,24 @@ object WorkspaceInitializer {
      * 调用 workspace.create + 把当前项目挪到显示顺序最前；成功返回 true。
      * 任一步失败不抛出（日志降级，UI 仍可用；最坏回退到旧行为）。
      */
-    fun ensureWorkspace(webUrl: String, projectPath: String): Boolean {
+    fun ensureWorkspace(webUrl: String, projectPath: String, homeDir: Path? = null): Boolean {
         if (projectPath.isBlank()) return false
         return try {
-            val base = webUrl.trimEnd('/')
+            // dsh 0.1.5 起：启动 URL 形如 `http://127.0.0.1:<port>/?token=<t>`，且所有 /api 请求必须携带
+            // 浏览器鉴权 cookie（仅 loopback 信任不足以放行，实测无 cookie → 401）；旧版无 token → cookie 为 null。
+            val base = originOf(webUrl)
+            val cookie = bootstrapSessionCookie(webUrl)
             val path = projectPath.replace('\\', '/')
             // 1. 注册/复用当前项目 workspace（幂等）
-            val created = rpc(base, "workspace.create", mapOf("path" to path))
+            // 0.1.5：remote 参数需包在 `args.request` 中（gateway 按 descriptor 校验）
+            val created = rpc(base, "workspace/create", mapOf("request" to mapOf("path" to path)), cookie)
             if (!created.ok) {
-                LOG.warn("workspace.create failed: ${created.errorText}")
+                LOG.warn("workspace/create failed: ${created.errorText}")
                 return false
             }
             // 2. 挪到最前：UI 默认落点 = 列表第一个 workspace
             val workspaceId = extractWorkspaceId(created.value)
-            if (workspaceId != null) bringToFront(base, workspaceId)
+            if (workspaceId != null) bringToFront(base, workspaceId, cookie, homeDir)
             LOG.info("workspace.ensureWorkspace ok for $projectPath")
             true
         } catch (e: Exception) {
@@ -65,30 +71,62 @@ object WorkspaceInitializer {
 
     // ---- 内部实现 ----
 
+    /** 等待 `storages/workspace.json` 中登记 [workspaceId]（create 落盘可能异步），返回其显示顺序。 */
+    private fun waitWorkspaceOrder(homeDir: Path, workspaceId: String, timeoutMs: Long = 3000): List<String> {
+        val end = System.currentTimeMillis() + timeoutMs
+        var order = readWorkspaceOrder(homeDir)
+        while (!order.contains(workspaceId) && System.currentTimeMillis() < end) {
+            try {
+                Thread.sleep(100)
+            } catch (_: InterruptedException) {
+                return order
+            }
+            order = readWorkspaceOrder(homeDir)
+        }
+        return order
+    }
+
+    /** 读取工作区显示顺序：0.1.5 为 `global.workspaceIds`（unit version 2），兼容 0.1.1 的顶层 `workspaceIds`。 */
+    private fun readWorkspaceOrder(homeDir: Path): List<String> = try {
+        val file = homeDir.resolve("storages/workspace.json")
+        if (!Files.isRegularFile(file)) emptyList() else {
+            val root = JsonCodec.decodeObject(Files.readString(file))
+            val global = root["global"] as? Map<*, *>
+            val ids = (global?.get("workspaceIds") ?: root["workspaceIds"]) as? List<*>
+            ids?.mapNotNull { it as? String }.orEmpty()
+        }
+    } catch (e: Exception) {
+        LOG.warn("failed to read workspace order: ${e.message}")
+        emptyList()
+    }
+
     /** workspace.create 响应 → workspaceId。 */
     private fun extractWorkspaceId(value: Map<String, Any?>): String? =
         (value["workspace"] as? Map<*, *>)?.get("workspaceId") as? String
 
-    /** workspace.list + workspace.insertBefore：把 [workspaceId] 挪到显示顺序最前。 */
-    private fun bringToFront(base: String, workspaceId: String) {
-        val list = rpc(base, "workspace.list", emptyMap())
-        if (!list.ok) {
-            LOG.warn("workspace.list failed: ${list.errorText}")
-            return
-        }
-        val order = (list.value["items"] as? List<*>)
-            ?.mapNotNull { (it as? Map<*, *>)?.get("workspaceId") as? String }
-            .orEmpty()
+    /**
+     * 把 [workspaceId] 挪到显示顺序最前。
+     * 0.1.5 起 `workspace/list` RPC 已移除（列表仅经流式 `workspace/follow` 下发），
+     * 故顺序改读 DSH_HOME 的 `storages/workspace.json`（v2：`global.workspaceIds`），再用 insertBefore 调整。
+     */
+    private fun bringToFront(base: String, workspaceId: String, cookie: String?, homeDir: Path?) {
+        val order = homeDir?.let { waitWorkspaceOrder(it, workspaceId) }.orEmpty()
         val move = computeBringToFront(order, workspaceId) ?: return // 空列表或已在最前
         val moved = rpc(
             base,
-            "workspace.insertBefore",
-            mapOf("workspaceId" to move.first, "beforeWorkspaceId" to move.second),
+            "workspace/insertBefore",
+            mapOf(
+                "request" to mapOf(
+                    "workspaceId" to move.first,
+                    "beforeWorkspaceId" to move.second,
+                )
+            ),
+            cookie,
         )
         if (moved.ok) {
             LOG.info("workspace $workspaceId moved to front (order=${moved.value["workspaceIds"]})")
         } else {
-            LOG.warn("workspace.insertBefore failed: ${moved.errorText}")
+            LOG.warn("workspace/insertBefore failed: ${moved.errorText}")
         }
     }
 
@@ -98,15 +136,55 @@ object WorkspaceInitializer {
         val errorText: String = "",
     )
 
+    /** 取 `http://host:port` origin（剥离 0.1.5 启动 URL 的 `?token=` 查询参数与尾斜杠）。 */
+    private fun originOf(webUrl: String): String = webUrl.substringBefore('?').trimEnd('/')
+
+    /**
+     * dsh 0.1.5+ 浏览器鉴权引导：`GET /?token=<t>` 返回 303 + `Set-Cookie: dsh-auth-…`；
+     * 之后所有 api 请求必须携带该 cookie（实测无 cookie → 401）。
+     * 旧版启动 URL 不含 token → 返回 null，调用方按无鉴权处理（保持 0.1.1 行为）。
+     */
+    private fun bootstrapSessionCookie(webUrl: String): String? {
+        if (!webUrl.contains("token=")) return null
+        return try {
+            val conn = URL(webUrl).openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = false
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 5000
+            conn.readTimeout = 8000
+            try {
+                val code = conn.responseCode
+                if (code in 200..399) {
+                    // 注意：headerFields 的 key 保留服务端原始大小写（Node 发 `set-cookie`），必须忽略大小写查找。
+                    val setCookies = conn.headerFields.entries
+                        .firstOrNull { it.key?.equals("Set-Cookie", ignoreCase = true) == true }
+                        ?.value
+                        .orEmpty()
+                    setCookies.firstOrNull { it.startsWith("dsh-") }?.substringBefore(';')
+                } else {
+                    LOG.warn("browser auth bootstrap http $code")
+                    null
+                }
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            LOG.warn("browser auth bootstrap failed: ${e.message}")
+            null
+        }
+    }
+
     /** 调用 dsh 内部 RPC（client-request 封装）；解析 `{ok, value?, error?}`。 */
-    private fun rpc(base: String, method: String, payload: Map<String, Any?>): RpcResult {
+    private fun rpc(base: String, method: String, payload: Map<String, Any?>, cookie: String? = null): RpcResult {
         val rpcId = "dsh-idea-" + UUID.randomUUID().toString()
         val body = gson(
             mapOf(
                 "type" to "client-request",
                 "rpcId" to rpcId,
                 "method" to method,
-                "payload" to payload,
+                // dsh 0.1.5：remote payload 必须"恰好包含一个 plain-object `args` 字段"
+                // （dsh-api-gateway: "Remote payload must contain exactly one plain-object args field"）
+                "payload" to mapOf("args" to payload),
             )
         )
         val conn = URL("$base/api/$method").openConnection() as HttpURLConnection
@@ -116,6 +194,7 @@ object WorkspaceInitializer {
             conn.readTimeout = 8000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
+            if (cookie != null) conn.setRequestProperty("Cookie", cookie)
             conn.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
             val code = conn.responseCode
             val resp = if (code in 200..299) {

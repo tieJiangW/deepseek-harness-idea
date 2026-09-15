@@ -16,9 +16,11 @@ data class RuntimeAssetSpec(
     fun assetName(target: Platform.Target): String? = assets[target.id]
 
     fun urlFor(target: Platform.Target, version: String): String? {
+        val resolved = baseUrl.replace("{version}", version).trim()
+        // 覆盖值可直接是"到文件的完整 URL"（设置页反显/用户粘贴）→ 原样使用，不再拼接平台资产名
+        if (resolved.endsWith(".zip", ignoreCase = true)) return resolved
         val name = assetName(target) ?: return null
-        val base = baseUrl.replace("{version}", version)
-        return if (base.endsWith("/")) base + name else "$base/$name"
+        return if (resolved.endsWith("/")) resolved + name else "$resolved/$name"
     }
 
     /** 校验和侧车 URL（`<资产名>.sha256`，同源）。 */
