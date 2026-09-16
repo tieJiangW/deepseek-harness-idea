@@ -325,7 +325,12 @@ src/main/resources/
 - 运行期自举（v0.2.0 引入）：`DshHomeManager.hasRuntime()` → 本地缺失且无 `DSH_IDEA_RUNTIME` 时，fat 安装从插件资源解压；**瘦身默认不捆绑 ~93MB 运行时**，经 `RuntimeProvisioner` 按平台从 `runtime-assets.json` 资产地图下载 `runtime-<os>-<arch>.zip` + 同名 `.sha256`，**SHA-256 校验**后安全解压到 `<config>/dsh-idea/runtime/<DSH_VERSION>`（幂等；`unzip` 兼容顶层单目录前缀剥离 + zip-slip 防护），离线/升级复用。`DSH_IDEA_RUNTIME` env 或设置页 runtime-directory 可跳过下载；fat（`-Pthin=false`）直接 bundle、不下载。下载 URL 与超时可配置。
 - 下载可靠性（**v0.2.1 加固**）：连接池化、HTTP/2 的 `java.net.http.HttpClient` + 浏览器 User-Agent + **60s 连接超时 + 可配置读超时 + 退避重试**——慢速/不稳定网络（如大陆访问 GitHub）也能成功；首次使用下载失败（临时文件父目录缺失 → `NoSuchFileException`）已修复：**先建父目录再写文件**（v0.2.1）。
 - 下载 UX（**v0.2.1**）：工具窗口下载进度条（connecting/verifying/downloading）+ **取消**；错误卡显示**失败的确切 URL + 底层原因 + Restart**；设置页回显**当前平台精确下载 URL（到文件）** + 一键复制 + 可配置下载超时 + **"Choose local runtime zip…" 本地 zip 离线导入**（内容校验 + SHA-256 对照 `.sha256` 侧车）。
-- 发布现状注意：**macos-x64（Intel Mac）运行时无法在 GitHub-hosted runner 构建（Intel macOS 已退役）→ 不在发布资产中，该平台下载 URL 会 404，需在其他主机构建后补传**。
+- 发布现状注意：**macos-x64（Intel Mac）运行时无法在 GitHub-hosted runner 构建（Intel macOS 已退役）**——
+  v0.2.3 起改为**本地交叉构建后手动上传**（`release-assets/runtime-macos-x64.zip`），该资产不再缺失；`linux-arm64` 同理。
+- **v0.2.3 发布记录（2026-09-16）**：GitHub Release `v0.2.3` 共 **11 个资产**（插件 zip + 5 平台运行时及其 `.sha256`）——
+  CI 用各平台原生 runner 覆盖了 win-x64 / macos-arm64 / linux-x64，**macos-x64 与 linux-arm64 由本地交叉构建上传**；
+  JetBrains Marketplace update **id=1171727**（`approve=false` 待审，`since/until = 241.0 — 262.*`）。
+  本次 `github.com:443` 不通，代码推送、tag、Release 与资产上传**全程走 REST API**（见 `RELEASE_PROCESS.md` §8）。
 - **跨 OS 原生依赖**：dsh 树含平台专属原生依赖（`@img/sharp-*`、`@koromix/koffi-*`、`node-addon-require-builtin-*`，被 dsh-subprocess-local/dsh-attachment-local/cordis-plugin-loader import），**不能跨平台共享一个 dsh 树**；运行时必须按目标 OS 生成。推荐 CI 矩阵在各目标 OS runner 构建；用 npm `--os/--cpu` 交叉仅作捷径（有变体不全风险）。
 - 插件包：瘦身约 1.8MB（不含运行时）；fat 约 93–98MB（含压缩运行时）。
 - 跨平台运行时（v0.2.3）：**五个平台资产已全部重建为 dsh 0.1.5-rc.2**（win-x64 103.8MB / macos-arm64 118.7MB /
