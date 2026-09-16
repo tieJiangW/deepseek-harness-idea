@@ -39,7 +39,7 @@ DeepSeek Harness（DSH）是一个以本地 Web UI（`dsh web`，默认 `http://
 - 不支持 Remote Development / JetBrains Gateway（MVP 检测到远程环境时提示不可用）。
 - 运行时在 macOS / Linux 上通过「首次运行按平台下载」提供（v0.2.0 起支持）；不保证离线环境的首次自举，可用 `DSH_IDEA_RUNTIME` / 内网镜像 / fat zip 覆盖。
 - 不做智能体修改的自动接受提交（审查面板默认"接受=丢弃快照"，不写回，因为 dsh 已直接写盘）。
-- 发布到 JetBrains Marketplace（"不发布"为 MVP 初期非目标，自 v0.1.3 上架后撤销；v0.2.0 起为瘦身跨平台单包，符合 Marketplace 单版本单 zip 模型；v0.2.1 已上传 update id 1159301，待审核）。
+- 发布到 JetBrains Marketplace（"不发布"为 MVP 初期非目标，自 v0.1.3 上架后撤销；v0.2.0 起为瘦身跨平台单包，符合 Marketplace 单版本单 zip 模型；**v0.2.3 已上传 update id 1171727，待审核**）。
 
 ## 3. 用户画像与核心场景
 
@@ -78,7 +78,7 @@ DeepSeek Harness（DSH）是一个以本地 Web UI（`dsh web`，默认 `http://
 - FR-01.4 加载状态反馈：启动中（转圈 + 阶段文案）、失败（原因 + 引导）。
 
 ### FR-02 运行时自举与生命周期（P0）
-- FR-02.1 运行时按平台下载（v0.2.0 起 thin 默认）：插件**不内置**约 93MB 的运行时（含 Node.js 22.x 与 dsh-home），首次使用按当前平台经 `runtime-assets.json` 下载 `runtime-<os>-<arch>.zip`（+ `.sha256`），SHA-256 校验后解压到 `PathManager.getConfigDir()/dsh-idea/runtime/<version>/`（幂等、带版本目录），缓存后离线/升级复用；fat 构建（`-Pthin=false`）才把运行时打进插件资源（免下载）。下载 URL 与超时可在设置页配置；`DSH_IDEA_RUNTIME` 或设置页 runtime-directory 可跳过下载。v0.2.1 下载 UX：工具窗口下载进度条（connecting/verifying/downloading）+ 取消；设置页回显精确到文件的当前平台 URL + 一键复制 + "选择本地运行时 zip…"离线导入（校验 zip 与 `.sha256`）；失败错误卡显示失败 URL + 底层原因 + Restart。
+- FR-02.1 运行时按平台下载（v0.2.0 起 thin 默认）：插件**不内置**约 93MB 的运行时（含 Node.js 22.x 与 dsh-home），首次使用按当前平台经 `runtime-assets.json` 下载 `runtime-<os>-<arch>.zip`（+ `.sha256`），SHA-256 校验后解压到 `PathManager.getConfigDir()/dsh-idea/runtime/<version>/`（幂等、带版本目录），缓存后离线/升级复用；fat 构建（`-Pthin=false`）才把运行时打进插件资源（免下载）。下载 URL 与超时可在设置页配置；`DSH_IDEA_RUNTIME` 或设置页「运行时目录」可跳过下载。v0.2.1 下载 UX：工具窗口下载进度条（connecting/verifying/downloading）+ 取消；设置页回显精确到文件的当前平台 URL + 一键复制 + "选择本地运行时 zip…"离线导入（校验 zip 与 `.sha256`）；失败错误卡显示失败 URL + 底层原因 + Restart。**v0.2.3**：下载地址输入框**反显当前生效值**（支持目录级 base 与"到文件的完整 URL"直连）+「默认」按钮；新增**「运行时目录」设置项**（环境变量的 GUI 版；默认按钮填入插件默认目录，且**与未设置等价**——仍会自动下载供给）；本地 zip 选择器修复（不再隐藏 `.zip`），文件无法经常规路径访问时经 **VFS 暂存**导入；运行时资产补齐**五个平台**（Windows x64、macOS arm64/x64、Linux x64/arm64）。
 - FR-02.2 每项目一个 Node 实例：工具窗口首次打开时懒启动，项目关闭时终止，IDE 退出时兜底终止。
 - FR-02.3 启动命令：`node <dsh>/lib/bin.js --profile web --host 127.0.0.1 --port 0 --patch <ide.yml>`，cwd=项目根目录，env 注入 `DSH_HOME`。
 - FR-02.4 端口发现：解析 stdout 中 `dsh web: http://127.0.0.1:<port>`，随后 HTTP 健康检查，通过后通知 UI 加载。
@@ -175,9 +175,9 @@ MVP 成功标准：全新 IDEA 实例中，安装插件 zip → 配置 API Key �
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 插件包体积 150-300MB（fat 内置运行时） | 分发/安装体验 | v0.2.0 起缓解：thin 默认不打包运行时（插件 zip 小），首次使用按平台下载约 93MB 运行时（进度/取消/可配置 URL 与超时/本地 zip 离线导入）；已上架 Marketplace（v0.2.1 已上传，待审核） |
-| Intel Mac（macos-x64）运行时资产缺失 | GitHub-hosted runner 无 Intel macOS（已退役），`runtime-macos-x64.zip` 无法在 CI 构建、未随 release 发布 → Intel Mac 首次下载 404 | 另行在 Intel 主机构建并发布该资产前，Intel Mac 用户经 `DSH_IDEA_RUNTIME` / 设置页 runtime-directory / "选择本地运行时 zip…"离线导入规避；macOS arm64 不受影响 |
-| Web UI DOM 变化破坏 JS 注入 | "发送选中代码"体验降级 | 注入失败自动降级剪贴板；`ide_get_sent_selection` 工具始终可用兜底 |
+| 插件包体积 150-300MB（fat 内置运行时） | 分发/安装体验 | v0.2.0 起缓解：thin 默认不打包运行时（插件 zip ≈1.83MB），首次使用按平台下载运行时（进度/取消/可配置 URL 与超时/本地 zip 离线导入/「运行时目录」指定）；已上架 Marketplace（**v0.2.3 已上传 update 1171727，待审核**） |
+| Intel Mac（macos-x64）运行时资产缺失 | 原：GitHub-hosted runner 无 Intel macOS（已退役），`runtime-macos-x64.zip` 无法在 CI 构建 → Intel Mac 首次下载 404 | **✅ 已解决（v0.2.3）**：改为在 Windows 主机**交叉构建**后随 Release 上传（`build-runtime.mjs` 已支持），`runtime-macos-x64.zip` 已提供；`linux-arm64` 同样补齐，五平台资产齐备。完全离线仍可经 `DSH_IDEA_RUNTIME` / 设置页「运行时目录」/「选择本地运行时压缩包…」 |
+| Web UI DOM 变化破坏 JS 注入 | "发送选中代码"体验降级 | **⚠️ 已实际发生（dsh 0.1.5）**：composer 由 `<textarea>` 改为 Lexical contenteditable → 注入失效，按设计**降级剪贴板**（有通知），`ide_get_sent_selection` 兜底；待按 Lexical 重写注入脚本（当前最高优先项） |
 | cordis patch 语法随 dsh 版本演进 | MCP 注入失效 | 锁定 dsh 版本；DSH_HOME 版本化；升级时回归验证 Step 3 |
 | JCEF 兼容性（WebSocket/IME） | 聊天/中文输入异常 | "外部浏览器打开"按钮兜底；JCEF 版本随 IDE 更新 |
 | 多项目并发资源占用 | 内存/端口 | 每项目实例 + 并发上限 3 + 懒启动；后续可优化为单实例多工作区 |

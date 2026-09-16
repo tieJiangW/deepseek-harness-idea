@@ -2,15 +2,37 @@
 
 本仓库开发一个 IntelliJ IDEA 插件（类 Qoder）：在 IDE 内嵌入 DeepSeek Harness（DSH）Web UI，让智能体能读写当前项目文件、通过 MCP 调用 IDE 能力，并提供代码上下文发送与 diff 审查/还原等原生集成。
 
+## 当前状态摘要（v0.2.3，2026-09-16）
+
+> **交接先看这一节**；实测细节见 [PROJECT_NOTES.md](./PROJECT_NOTES.md)，运行时细节见 [release-runtime.md](./release-runtime.md)，
+> 发布操作见 [RELEASE_PROCESS.md](./RELEASE_PROCESS.md)。
+
+- **版本与产物**：插件 `0.2.3`（thin 默认 ≈1.83 MB）→ `build/distributions/deepseek-harness-idea-0.2.3.zip`
+- **内置运行时**：`@deepseek-ai/dsh@0.1.5-rc.2` + Node.js 22.23.2（唯一版本来源 `DshHomeManager.DSH_VERSION`）
+- **IDE 兼容**：`since-build=241` / `until-build=262.*`；已在 **2024.1.7（默认，含全部测试）/ 2024.3.2 / 2026.2**
+  分别通过 `compileKotlin` + `compileTestKotlin`
+- **测试**：**130 项全部通过**（含 4 个真实 dsh 冒烟：启动与端口 / workspace 注册与置顶 / MCP 6 工具 / session 迁移）
+- **平台**：Windows x64、macOS（arm64 / x64）、Linux（x64 / arm64）**五平台运行时均已构建并随 Release 发布**
+- **发布状态**：GitHub Release [`v0.2.3`](https://github.com/tieJiangW/deepseek-harness-idea/releases/tag/v0.2.3)
+  （11 个资产：插件 zip + 5 平台运行时及其 `.sha256`）；JetBrains Marketplace update **1171727**（待审）
+- **⚠️ 已知限制（优先级最高）**：dsh 0.1.5 将 composer 由 `<textarea>` 改为 **Lexical contenteditable**，
+  因此「发送选中代码」与「DSH 一键解释」目前**降级为剪贴板**（有通知）。适配需改写 JS 注入并**在真实 JCEF 页面验证**。
+- **⚠️ 本机环境注意**：`github.com:443` 不通（`api.github.com`、`uploads.github.com`、`plugins.jetbrains.com` 可达），
+  故 v0.2.3 发版全程走 REST API（见 RELEASE_PROCESS.md §8）；日常 `git push/fetch` 需代理或 SSH key。
+- **下一步候选**：① composer 注入适配（Lexical）；② `ide_reveal_file` 项目树定位；③ 远程开发/Gateway 检测提示；
+  ④ `org.jetbrains.intellij` 1.17.4 → 2.x；⑤ FR-05.4「发送当前文件」
+
 ## 文档索引
 
 | 文档 | 说明 | 状态 |
 |---|---|---|
 | [PRD.md](./PRD.md) | 规划需求文档：目标、用户故事、功能/非功能需求、验收标准、风险 | 草稿（随实现迭代更新） |
 | [DESIGN.md](./DESIGN.md) | 详设文档：架构、模块设计、接口契约、数据流、测试策略 | 草稿（随实现迭代更新） |
-| [ACCEPTANCE.md](./ACCEPTANCE.md) | PRD §7 验收清单走查（Step 5 执行，自动化 vs 手工项） | 维护中（v0.2.1：122 项测试全部通过；手工项待真实 IDE 会话） |
-| [MILESTONE_REVIEW.md](./MILESTONE_REVIEW.md) | 里程碑评审（Step 6）：Step 0–5 总结、需求覆盖矩阵、遗留问题、风险回顾、后续规划 | ✅ 完成（2026-08-20 评审时点快照，最新状态见上方文档） |
-| [PROJECT_NOTES.md](./PROJECT_NOTES.md) | 项目知识库：本机构建环境、dsh 行为实测、踩坑记录、2024.1 API 勘误、后续任务参考 | 维护中（v0.2.1，122 项测试全部通过） |
+| [ACCEPTANCE.md](./ACCEPTANCE.md) | PRD §7 验收清单走查（Step 5 执行，自动化 vs 手工项） | 维护中（v0.2.3：130 项测试全部通过；手工项待真实 IDE 会话） |
+| [MILESTONE_REVIEW.md](./MILESTONE_REVIEW.md) | 里程碑评审（Step 6）：Step 0–5 总结、需求覆盖矩阵、遗留问题、风险回顾、后续规划 | 历史快照（2026-08-20 时点；**遗留问题 A–D 清单仍在使用**，最新状态见本文件「当前状态摘要」） |
+| [PROJECT_NOTES.md](./PROJECT_NOTES.md) | 项目知识库：本机构建环境、dsh 行为实测、踩坑记录、2024.1 API 勘误、后续任务参考 | 维护中（v0.2.3，130 项测试全部通过） |
+| [release-runtime.md](./release-runtime.md) | 运行时发布与资产契约：平台矩阵、原生构建/交叉构建、下载与解压、离线场景 | 维护中（v0.2.3：五平台资产已发布） |
+| [RELEASE_PROCESS.md](./RELEASE_PROCESS.md) | 发布流程参考（GitHub Release + JetBrains Marketplace）：凭据、步骤、接口、编码陷阱、API 备用通道 | 维护中（v0.2.3 实操验证） |
 
 ## 文档约定
 

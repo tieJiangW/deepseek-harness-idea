@@ -24,7 +24,7 @@ changes with native diff tooling.
 - **运行日志一键解释 / One-click log explanation** — 在项目运行控制台选中一段日志，右键"DSH 一键解释"，自动把解释请求 + 日志提交给 DSH（无需手动粘贴/回车）。
 - **每项目独立工作区 / Per-project workspace** — 每个项目使用独立的 DSH_HOME，工作区按项目隔离；切换项目后 DSH 自动以当前项目为工作空间，不会残留其他项目的工作区。
 - **审查与还原 / Review & restore** — 基线快照 + 原生 diff（修改/新增/删除），支持还原单个/全部、忽略、重新基线。
-- **自包含运行时 / Self-contained runtime** — Node.js 与 DeepSeek Harness 运行时随插件打包，首次使用自动解压，无需单独安装或联网。
+- **自动供给的运行时 / Self-provisioned runtime** — 插件默认**不捆绑**运行时（瘦身包约 1.8MB）：首次使用按当前平台自动下载 Node.js 22.x + DeepSeek Harness 运行时（SHA-256 校验，缓存后离线复用）；也可在设置页用「运行时目录」或「选择本地运行时压缩包…」完全离线指定，或用 `-Pthin=false` 构建内置运行时的 fat 包。
 - **生命周期管理 / Lifecycle** — 每项目一个实例（并发上限 3）；项目关闭 / IDE 退出自动终止进程；崩溃自动退避重启。
 - **日志与诊断 / Logs & diagnostics** — DSH Log 标签页 + 崩溃通知 + 可配置日志级别。
 - **中英双语界面 / Bilingual UI** — 插件 UI 跟随 IDE 语言（English / 简体中文）。
@@ -33,11 +33,11 @@ changes with native diff tooling.
 
 - IntelliJ IDEA Community / Ultimate **2024.1 – 2026.2**（build 241 – 262；Windows 10/11 x64、macOS arm64/x64、Linux x64）
 - 持有 DeepSeek API Key（`deepseek-chat` / `deepseek-reasoner`）
-- 构建机器需要网络（构建时下载 Node.js 22.23.2 与 `@deepseek-ai/dsh@0.1.5-rc.2`）；**运行时按平台解析**：首次使用需联网一次下载运行时（SHA-256 校验，缓存到配置目录后离线可用；离线可用 `DSH_IDEA_RUNTIME` / 内网镜像 / fat zip）
+- 构建机器需要网络（构建时下载 Node.js 22.23.2 与 `@deepseek-ai/dsh@0.1.5-rc.2`）；**运行时按平台解析**：首次使用需联网一次下载运行时（SHA-256 校验，缓存到配置目录后离线可用；离线可用设置页「运行时目录」/ `DSH_IDEA_RUNTIME` / 内网镜像 / fat zip）；**五个平台**（Windows x64、macOS arm64/x64、Linux x64/arm64）的运行时资产随 Release 提供
 
 ## 安装 / Install
 
-1. 构建插件 zip（见下）或下载 [Releases](../../releases) 中的 `deepseek-harness-idea-<version>.zip`（瘦身约 2MB，跨平台单个 zip）与对应的 `runtime-<os>-<arch>.zip` 运行时资产（附 `.sha256`）。
+1. 构建插件 zip（见下）或下载 [Releases](../../releases) 中的 `deepseek-harness-idea-<version>.zip`（瘦身约 1.8MB，跨平台单个 zip）与对应平台的 `runtime-<os>-<arch>.zip`（附 `.sha256`；五个平台资产齐全）。
 2. IDEA 中 `Settings → Plugins → ⚙ → Install Plugin from Disk…` 选择该 zip，重启 IDE。
 3. 打开右侧 **DeepSeek Harness** 工具窗口（首次打开自动下载并解压当前平台运行时，约 1 分钟；之后复用本地缓存不再下载）。
 4. `Settings → Tools → DeepSeek Harness` 填入 DeepSeek API Key（或从本机已有 DeepSeek 配置一键导入）并应用，开始对话。

@@ -37,13 +37,13 @@
 
 ```powershell
 # 1) 版本号（唯一来源）
-#    build.gradle.kts:  version = "0.2.2"
+#    build.gradle.kts:  version = "0.2.3"
 
 # 2) changelog：写入 plugin.xml 的 <change-notes>（Marketplace 与 IDE 都读这里，见 §4.4）
 
 # 3) 构建
 .\gradlew.bat buildPlugin
-# 产物: build\distributions\deepseek-harness-idea-0.2.2.zip
+# 产物: build\distributions\deepseek-harness-idea-0.2.3.zip
 # -PplatformVersion=2026.2 可做前向编译检查；默认平台 2024.1.7
 ```
 
@@ -85,7 +85,7 @@ Headers:
   Authorization: Bearer <PAT>
   Accept: application/vnd.github+json
   User-Agent: <任意非空，GitHub 强制要求>
-Body (JSON): { "tag_name": "v0.2.2", "name": "v0.2.2", "body": "<发布说明>", "draft": false, "prerelease": false }
+Body (JSON): { "tag_name": "v0.2.3", "name": "v0.2.3", "body": "<发布说明>", "draft": false, "prerelease": false }
 ```
 
 - 若 `tag_name` 尚不存在，GitHub 会**自动创建**该 tag 并指向仓库默认分支 HEAD。
@@ -110,8 +110,8 @@ Body: 文件二进制
 Release API 已自动建远端 tag。如需本地 tag 与远端一致：
 
 ```powershell
-git tag v0.2.2
-git push "https://x-access-token:$pat@github.com/tieJiangW/deepseek-harness-idea.git" tag v0.2.2
+git tag v0.2.3
+git push "https://x-access-token:$pat@github.com/tieJiangW/deepseek-harness-idea.git" tag v0.2.3
 ```
 
 ---
@@ -127,7 +127,7 @@ Headers:
 Content-Type: multipart/form-data
 Fields:
   xmlId   = com.deepseek.harness.idea      # 或用 pluginId = 33820（二选一）
-  file    = @build/distributions/deepseek-harness-idea-0.2.2.zip
+  file    = @build/distributions/deepseek-harness-idea-0.2.3.zip
   channel = ""                             # 留空 = Stable；可填 nightly/eap 等
 可选:
   isHidden=true                            # 通过审核后先不公开
@@ -140,7 +140,7 @@ Fields:
 ### 4.2 返回与状态
 
 ```json
-{ "id": 1160462, "version": "0.2.2", "approve": false, "channel": "",
+{ "id": 1160462, "version": "0.2.3", "approve": false, "channel": "",
   "link": "/plugin/33820-deepseek-harness/versions/stable/1160462", "pluginId": 33820 }
 ```
 
@@ -152,7 +152,7 @@ Fields:
 ```powershell
 Add-Type -AssemblyName System.Net.Http
 $tok = $env:MARKETPLACE_TOKEN
-$zip = 'build\distributions\deepseek-harness-idea-0.2.2.zip'
+$zip = 'build\distributions\deepseek-harness-idea-0.2.3.zip'
 
 $client = [System.Net.Http.HttpClient]::new()
 $client.DefaultRequestHeaders.Authorization =
@@ -162,7 +162,7 @@ $form = [System.Net.Http.MultipartFormDataContent]::new()
 $form.Add([System.Net.Http.StringContent]::new('com.deepseek.harness.idea'), 'xmlId')
 $file = [System.Net.Http.ByteArrayContent]::new([System.IO.File]::ReadAllBytes($zip))
 $file.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new('application/zip')
-$form.Add($file, 'file', 'deepseek-harness-idea-0.2.2.zip')
+$form.Add($file, 'file', 'deepseek-harness-idea-0.2.3.zip')
 
 $resp = $client.PostAsync('https://plugins.jetbrains.com/api/updates/upload', $form).GetAwaiter().GetResult()
 Write-Output ("HTTP " + [int]$resp.StatusCode)
@@ -199,7 +199,7 @@ $form.Dispose(); $client.Dispose()
 
 ```powershell
 # GitHub：Release 与资产
-GET https://api.github.com/repos/tieJiangW/deepseek-harness-idea/releases/tags/v0.2.2
+GET https://api.github.com/repos/tieJiangW/deepseek-harness-idea/releases/tags/v0.2.3
 #   检查 tag_name / assets[].name / assets[].size / body 中文是否正常
 
 # GitHub：main 是否在目标提交
@@ -217,6 +217,9 @@ GET https://api.github.com/repos/tieJiangW/deepseek-harness-idea/commits/main
 ## 7. 已知注意事项
 
 - **`release-assets/` 已在 `.gitignore`**：存放跨平台 runtime zip（体积大），只作为 GitHub Release 的资产来源，**不入库**。
+- **v0.2.3 实操记录**：本机 `github.com:443` 不通，代码推送 / tag / Release / 资产上传**全程走 REST API**（见 §8）；
+  其中 `macos-x64`、`linux-arm64` 两个资产 CI 不产出，由本地交叉构建后手动上传（见 `release-runtime.md` §3.1）；
+  Marketplace 上传成功（update 1171727）后 `approve=false` 属正常待审状态。
 - 资产文件名必须与插件内 `runtime-assets.json` 一致，否则首次使用下载运行时 404。
 - `main` 受分支保护；管理员 PAT 可直推（会提示 `Bypassed rule violations`）。
 - Marketplace 审核通过后版本才会公开；上传后可在插件面板查看/管理该 update。

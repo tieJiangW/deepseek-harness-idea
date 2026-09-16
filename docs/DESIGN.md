@@ -64,7 +64,9 @@
 
 ### 2.3 关键技术依据（已通过本机源码/环境验证）
 
-1. **端口发现**：`dsh web` 支持 `--port 0`，由 OS 分配；启动后 stdout 打印 `dsh web: http://127.0.0.1:<port>`（`dsh-web-app/lib/index.js:107`）。插件逐行读取 stdout 正则 `dsh web: http://127\.0\.0\.1:(\d+)` 得 webPort，随后健康检查。
+1. **端口发现**：`dsh web` 支持 `--port 0`，由 OS 分配；启动后 stdout 打印 `dsh web: http://127.0.0.1:<port>`
+   （**dsh 0.1.5 起为 `http://127.0.0.1:<port>/?token=<t>`**，浏览器鉴权 token）。插件逐行读取 stdout，
+   用 `PortParser.parsePort` 取端口、`PortParser.parseUrl` 取**完整启动 URL（含 token）**，随后健康检查（见 §3.4）。
 2. **信任围栏**：`/api` 请求的浏览器信任围栏接受 loopback hostname（`dsh-client-connection` `isLoopbackHostname`），故 JCEF 从 `http://127.0.0.1:<webPort>` 加载可正常调用 API；无需 `--trusted-host`。`--host 0.0.0.0` 被 dsh 主动拒绝，天然防外网暴露。
 3. **凭据**：插件在 DSH_HOME 下以 `DEEPSEEK_API_KEY` 为键管理密钥（key 真源 = PasswordSafe + 插件自己管理的
    全局凭据文件）。设置页写入 PasswordSafe + 全局文件；**不向 dsh 进程注入 `DEEPSEEK_API_KEY` 环境变量**
@@ -151,7 +153,11 @@
 
 - `ProcessBuilder`：`[<node>, <dsh>/lib/bin.js, --profile, web, --patch, <ide.yml>, --host, 127.0.0.1, --port, 0, --no-open]`（`<node>` = `node/node.exe` 或 `node/node`，见 `Platform.nodeBinName`）；`directory = 项目根目录`；env：`DSH_HOME=<dsh-home>`、`DSH_IDE_BRIDGE_URL=http://127.0.0.1:<bridgePort>`、`DSH_IDE_TOKEN=<random>`；**不注入 `DEEPSEEK_API_KEY`**（见 §2.3/§3.9）；`redirectErrorStream=true` 或分别捕获。
 - **参数列表直传，不走 shell**（兼容路径含空格/中文）。
-- stdout 逐行读取：匹配 `dsh web: http://127.0.0.1:(\d+)` → 记录 webPort → HTTP GET `/`（或 `/api`）健康检查（超时 10s，重试 ≤10 次间隔 500ms）→ 回调通知工具窗口加载。
+- stdout 逐行读取：匹配 `dsh web: http://127.0.0.1:(\d+)` → 记录 webPort 与 launchUrl → HTTP 健康检查
+  （超时 10s，重试 ≤10 次间隔 500ms）→ 回调通知工具窗口加载。
+  **dsh 0.1.5 起**：健康检查须携带启动 URL 的 `?token=`（否则 `/` 返回 **401**），并**禁止跟随重定向**
+  （带 token 的 `/` 正常返回 **303**）；`200..399 || 401` 均视为"服务已就绪"，
+  JCEF 加载与"外部浏览器打开"都使用带 token 的 URL（`DshProcessManager.launchUrl` / `webUrl()`）。
 - 崩溃/退出监听：非预期退出（无 `stop` 标记）→ 通知 + 指数退避自动重启（500ms/2s/5s，≤3 次）→ 手动"重启"按钮；日志写入插件日志 + 工具窗口日志页。
 - 停止：`stop(reason)` → `process.destroy()` + 平台无关的进程树终止（Windows 用 `taskkill /PID <pid> /T /F` 兜底）→ 清理状态。
 - 状态机：`STOPPED → STARTING → RUNNING → STOPPED | CRASHED`；`CRASHED` 可 `RESTARTING`。
@@ -168,19 +174,28 @@
 dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录时，web UI 顶部显示
 "选择一个工作区开始"，不会自动把进程 cwd 设为工作区（实测 dsh 0.1.1-rc.2，`workspaceIds: []`）。
 
-插件在 dsh 健康检查通过后调用内部 RPC `POST /api/workspace.create`：
+插件在 dsh 健康检查通过后调用内部 RPC `POST /api/workspace/create`：
 
 ```json
-{"type":"client-request","rpcId":"<uuid>","method":"workspace.create","payload":{"path":"D:/proj/MyApp"}}
+{"type":"client-request","rpcId":"<uuid>","method":"workspace/create",
+ "payload":{"args":{"request":{"path":"D:/proj/MyApp"}}}}
 ```
 
-- 127.0.0.1 loopback 信任围栏放行，无需鉴权头（实测 200）；
+> **dsh 0.1.5-rc.2 契约变更（v0.2.3 适配，均实测）**：
+> ① 方法名点号 → 斜杠（`workspace/create`；旧的 `workspace.create` 返回 **404**）；
+> ② `payload` 必须"恰好含一个 plain-object `args`"（否则 `gateway/internal`）；
+> ③ `args` 内再包一层 `request`（否则 `gateway/arguments-invalid: missing "request"; unexpected "path"`）；
+> ④ **`workspace/list` 已移除** → 显示顺序改读 `storages/workspace.json`（**v2 结构**：`global.workspaceIds` + `tables.workspaces`）。
+> 完整实测见 `docs/PROJECT_NOTES.md`「dsh 0.1.5-rc.2 升级」。
+
+- **鉴权**：0.1.1 时 loopback 信任围栏放行、无需鉴权头；**0.1.5 起 `/api` 一律需要浏览器鉴权 cookie**
+  （`GET /?token=` → 303 + `Set-Cookie: dsh-auth-…`，`Authorization: Bearer` 与 query token 均不被接受），
+  `WorkspaceInitializer.bootstrapSessionCookie` 先换 cookie 再调 API；
 - **幂等**：同路径重复调用返回既有 workspace（`created:false`），不重复创建；
-- 实现：`WorkspaceInitializer.ensureWorkspace(webUrl, projectPath)`，在
+- 实现：`WorkspaceInitializer.ensureWorkspace(webUrl, projectPath, homeDir)`，在
   `DshProcessManager.waitHealthy` 置 RUNNING 后调用；失败仅日志降级，不阻塞 UI；
-- 验证：`WorkspaceInitializerTest`（12 例）+ `WorkspaceInitializerSmokeTest`（真实 dsh，
-  切换项目场景）+ `DshBootstrapSmokeTest` 增强（真实 dsh 启动后断言 `workspace.json`
-  出现项目路径）。
+- 验证：`WorkspaceInitializerTest` + `WorkspaceInitializerSmokeTest`（真实 dsh，切换项目场景）
+  + `DshBootstrapSmokeTest`（真实 dsh 启动后断言 `workspace.json` 出现项目路径）。
 
 **切换项目修复（v0.1.3-dev 实测）**：两处修正——
 
@@ -189,10 +204,11 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
    用户选中旧面板即显示旧项目工作区。修复：`createToolWindowContent` 开头先
    `contentManager.removeContent(old, true)` 清空全部旧 content（触发旧面板 dispose → 杀其
    dsh 进程）；`DshToolWindowPanel.dispose()` 加 AtomicBoolean 幂等位。
-2. **`workspace.create` 幂等不改变顺序**：`workspace.json` 的 `workspaceIds` 显示顺序中，
-   新项目若已是既有 workspace 则保持原位置；为让当前项目稳定显示在列表最前，
-   `ensureWorkspace` 在 create 成功后追加 `workspace.list` + `workspace.insertBefore`
-   （把当前项目挪到最前；dsh 0.1.1-rc.2 已暴露该 RPC）。
+2. **幂等 create 不改变顺序**：显示顺序中，新项目若已是既有 workspace 则保持原位置；为让当前项目稳定显示在
+   列表最前，`ensureWorkspace` 在 create 成功后调用 `workspace/insertBefore` 把当前项目挪到最前。
+   **dsh 0.1.5 起**：新建 workspace 会被 dsh **自动置顶**，但**幂等 create（已存在）仍不改变顺序**，
+   故该步骤仍然必要；顺序来源由已移除的 `workspace.list` 改为读 `storages/workspace.json`
+   （`waitWorkspaceOrder` / `readWorkspaceOrder`，`samePath` 规范化路径比较，兼容 v1 顶层 / v2 `global` 结构）。
 
 真实 dsh 冒烟验证：A→B 切换后 B 在 `workspaceIds[0]`，切回 A 后 A 回到最前。
 
@@ -226,7 +242,7 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 
 **patch 注入（`ide.yml`）**：
 
-- 由插件生成（`McpPatchGenerator`），内容为 cordis loader patch 条目数组。**实测语法**（dsh 0.1.1-rc.2）：`--patch` 覆盖层只能修改已有条目或 `insert` 新增；新增 mcp-client 实例须用 `insert` 列表，且 `name` 字段必须显式声明插件包名：
+- 由插件生成（`McpPatchGenerator`），内容为 cordis loader patch 条目数组。**实测语法**（dsh 0.1.1-rc.2；**0.1.5-rc.2 冒烟复验仍适用**——strict patch 启动 + 6 工具注册通过）：`--patch` 覆盖层只能修改已有条目或 `insert` 新增；新增 mcp-client 实例须用 `insert` 列表，且 `name` 字段必须显式声明插件包名：
 
 ```yaml
 # ide.yml（McpPatchGenerator 生成，mcpPort 动态填入）
@@ -252,7 +268,10 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 - 编辑器右键动作"发送选中代码到 DSH"（`SendSelectionAction`，注册于 `EditorPopupMenu`，见 plugin.xml `<actions>`）：
   1. `ReadAction` 读选中文本/文件/语言（≤64KB，超出截断并注明 `…(已截断)`）；
   2. **直接写入 Bridge 的 sent-selection 队列**（`SentSelectionQueue`：容量 ≤10 条、单条 ≤64KB，环形淘汰）——智能体可随时经 `ide_get_sent_selection` 取回，**必达**；
-  3. 聚焦工具窗口 + JCEF 注入预填 composer：轮询等待 dsh web 的 `<textarea>`（实测为 React 受控组件），原生 setter 设置 value + 派发 `input` 事件（触发 React onChange）；
+  3. 聚焦工具窗口 + JCEF 注入预填 composer：轮询等待 dsh web 的 `<textarea>`（**0.1.1 实测**为 React 受控组件），
+     原生 setter 设置 value + 派发 `input` 事件（触发 React onChange）。
+     **⚠️ dsh 0.1.5 起 composer 已改为 Lexical contenteditable**（`data-lexical-editor="true"`），
+     该注入当前**必然失败** → 走第 4 步剪贴板降级（有通知）；适配需改写为 contenteditable 路径并在真实 JCEF 页面验证；
   4. 注入失败/未运行 → 系统剪贴板 + 通知"请粘贴到输入框（代码已就绪）"。
 - **紧凑文件引用**（v0.5.4，用户反馈迭代）：注入内容仅 `@绝对路径#L起始-结束` + 尾随换行
   （`buildCompactReference`），**无提示语、无代码本体**；注入后光标 `setSelectionRange` 移到
@@ -323,8 +342,11 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
      `blocked` → 消息留在输入框 + 提示手动回车；其他 → 剪贴板兜底 + 失败通知；
      `setupJsQuery` 必须在 `loadURL` **之前**创建（CEF message router 在页面加载时注入
      `window.<funcName>`；创建失败降级为无验证乐观提示）。
-- 技术边界（实测 dsh 0.1.1-rc.2）：composer 文本区即页面 `<textarea>`（`document.querySelector('textarea')`）；
-  发送按钮 aria-label 实际为 "Send message" / "发送消息"（`t("input.send")`）。
+- 技术边界：**0.1.1 实测** composer 文本区即页面 `<textarea>`（`document.querySelector('textarea')`）；
+  发送按钮 aria-label 为 "Send message" / "发送消息"（`t("input.send")`）。
+  **⚠️ 0.1.5 起 composer 改为 Lexical contenteditable**（`data-lexical-editor="true"`；0.1.1 的 `jsx("textarea")` 已不存在）→
+  现有注入失效、按设计降级剪贴板；适配需改用 contenteditable 路径（`document.execCommand('insertText')` + Enter 派发）
+  并**在真实 JCEF 页面验证**（当前最高优先项）。
 
 ## 4. 接口契约
 
@@ -466,7 +488,8 @@ stdout   = 逐行读取；含 "dsh web: http://127.0.0.1:<webPort>"
 - `DshRuntimeRegistryTest`(3)：并发上限 3、释放名额、幂等（Step 5）
 - `JsonCodecTest`(9)：自研 JsonCodec 编解码（v0.1.1）
 - `ExplainLogComposerTest`(4)：运行日志一键解释的消息组装（v0.1.3-dev）
-- `WorkspaceInitializerTest`(12)：workspace.create/insertBefore 链路（v0.1.3-dev）
+- `WorkspaceInitializerTest`：workspace 注册链路（v0.1.3-dev 引入；**v0.2.3 改为** `workspace/create` + 读 `storages/workspace.json` 定序 + `workspace/insertBefore`）
+- `DshHomeManagerRuntimeRootTest`(5)：运行时目录优先级（env > 设置页 > 默认）与路径等价 `samePath`（v0.2.3）
 - `LegacySessionMigratorTest`(14)：`projectKey` 编码 + 旧 session/投影缓存迁移 + 幂等（v0.1.3-dev）
 - `DshCredentialsMaskTest`(10)：API key 脱敏 + 凭据文件解析（v0.1.3-dev）
 - `DshCredentialsSyncTest`(6)：Web UI 改 key 回写全局的比对逻辑（v0.1.3-dev）
@@ -534,4 +557,4 @@ PRD §7 验收清单 9 条（含 v0.1.3-dev 新增"DSH 一键解释"）。
 | 2026-08-23 | v0.1.3-dev | **设置页回显兜底：凭据文件读取**（用户实测"改后仍为空"）：PasswordSafe 读不到 key 时设置页回显为空。`DshCredentials.readApiKeyFromCredentialFile`（行级解析）＋ `readApiKeyWithFallback`（先 PasswordSafe，无则回退插件全局凭据文件，方案A真源）；设置页 `readStoredApiKey()` 用它。DshCredentialsMaskTest 增至 10 例 |
 | 2026-08-23 | v0.1.3-dev | **dsh Web UI 改 API key 也要全局生效**（用户要求+选B方案）：① 去掉 `DshProcessManager` 启动时注入的 `DEEPSEEK_API_KEY` 环境变量——dsh-credentials-local 的 `resolve()` 是 `inherited env wins`，注入 env 会使 dsh 永远读旧值，且 Web UI 改 key 被 `assertUnshadowed` 直接拒绝（源码 `dsh-credentials-local lib/index.js:636`）；② 新增 `DshCredentialsSync`（`WatchService` 监听各项目 DSH_HOME 凭据文件，dsh Web UI/Models page 以 `version:1 + refs.DEEPSEEK_API_KEY` 写入该文件 → 捕获 → 回写 PasswordSafe + 插件全局凭据文件）。**方案B 语义**：改 key 的那个 dsh 进程（去 env 后读文件层，该进程立即生效），其它项目**下次启动/重启**时 `syncCredentials()`/`ensureHome()` 从全局复制+透传 → 全局一致。监听器随项目 Disposable 释放（`DshCredentialsSync.release(projectName)`）。`onFileChanged` 仅当子项目 key 与全局不同才回写（无自激循环）。新增 DshCredentialsSyncTest 6 例 |
 | 2026-08-30 | v0.2.0 | **macOS / Linux 主机兼容（瘦身通用插件 + 按平台下载运行时）**：① `Platform`（os/arch→target/nodeBinName/assetName，前缀匹配防 `darwin`/`win` 冲突）；`DshHomeManager.nodeExe()` 平台化，`DshProcessManager.killTree` 跨平台进程树，symlink 兜底仅 Windows；② `RuntimeProvisioner`+`RuntimeArchive`+`RuntimeAssets`（`runtime-assets.json` 资产地图；下载+`.sha256` 校验+安全解压；`DSH_IDEA_RUNTIME`/手动路径离线逃生）；设置页「运行时下载地址」；③ `build-runtime.mjs`（跨平台，任意主机产出 `runtime-<os>-<arch>.zip`+`.sha256`）；Gradle `buildRuntime` 改调 mjs、瘦身默认（`-Pthin=false` 保留 fat）、新增 Gradle wrapper；④ `.github/workflows/build-release.yml` 矩阵 + `docs/release-runtime.md`；测试 100/100（PlatformTest/RuntimeAssetsTest/RuntimeProvisionerTest） |
-| 2026-09-15 | v0.2.3 | dsh 运行时 0.1.1-rc.2 → **0.1.5-rc.2**：① 常量与脚本同步（`DshHomeManager.DSH_VERSION`、`build.gradle.kts` `dshVersion`、`scripts/build-runtime.mjs`/`.ps1` 默认值）；重建 win-x64 运行时并更新 `release-assets/`。② **浏览器鉴权（0.1.5 新增）**：启动行 `dsh web: http://127.0.0.1:<port>/?token=<t>`；`GET /`（无 token）401，`GET /?token=` 303 + `Set-Cookie: dsh-auth-<authority-hash>=v1.…`；`/api` 一律要该 cookie。`PortParser.parseUrl` 保留完整 URL；`DshProcessManager.launchUrl` 供 JCEF/健康检查/`onUrlReady`（健康检查 `instanceFollowRedirects=false`，`200..399 || 401` 视为就绪）；`WorkspaceInitializer.bootstrapSessionCookie` 换取 cookie。③ **RPC 契约**：`workspace/<method>` 斜杠命名空间；信封 `{"type":"client-request","rpcId","method","payload":{"args":{"request":{…}}}}`；`workspace/list` 移除，置顶顺序改读 `storages/workspace.json` v2 `global.workspaceIds`（新增 `waitWorkspaceOrder`/`readWorkspaceOrder`）。④ 未适配（已知降级）：0.1.5 composer 由 `<textarea>` 改 Lexical contenteditable，JS 注入走剪贴板兜底。测试 **124 项全部通过** |
+| 2026-09-15 | v0.2.3 | dsh 运行时 0.1.1-rc.2 → **0.1.5-rc.2**：① 常量与脚本同步（`DshHomeManager.DSH_VERSION`、`build.gradle.kts` `dshVersion`、`scripts/build-runtime.mjs`/`.ps1` 默认值）；重建 win-x64 运行时并更新 `release-assets/`。② **浏览器鉴权（0.1.5 新增）**：启动行 `dsh web: http://127.0.0.1:<port>/?token=<t>`；`GET /`（无 token）401，`GET /?token=` 303 + `Set-Cookie: dsh-auth-<authority-hash>=v1.…`；`/api` 一律要该 cookie。`PortParser.parseUrl` 保留完整 URL；`DshProcessManager.launchUrl` 供 JCEF/健康检查/`onUrlReady`（健康检查 `instanceFollowRedirects=false`，`200..399 || 401` 视为就绪）；`WorkspaceInitializer.bootstrapSessionCookie` 换取 cookie。③ **RPC 契约**：`workspace/<method>` 斜杠命名空间；信封 `{"type":"client-request","rpcId","method","payload":{"args":{"request":{…}}}}`；`workspace/list` 移除，置顶顺序改读 `storages/workspace.json` v2 `global.workspaceIds`（新增 `waitWorkspaceOrder`/`readWorkspaceOrder`）。④ 未适配（已知降级）：0.1.5 composer 由 `<textarea>` 改 Lexical contenteditable，JS 注入走剪贴板兜底。**五平台运行时**（新增 macOS x64 / Linux arm64）由本地交叉构建补齐（`build-runtime.mjs`：符号链接容错 / 主机 node 执行 npm / `--libc glibc` / 按主机能力选 zip 命令）。**设置页**：「运行时下载地址」反显当前生效值 + 默认按钮、「运行时目录」新设置项（默认按钮填入插件默认目录，**等价于未设置**）、本地 zip 选择器修复（`chooseJars`）与 VFS 暂存导入、错误卡换行与诊断。**IDE 边界**：2024.1.7 / 2024.3.2 / 2026.2 编译（含测试代码）全部通过。测试 **130 项全部通过** |
