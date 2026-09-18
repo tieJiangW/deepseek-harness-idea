@@ -1,6 +1,7 @@
 package com.deepseek.harness.idea.runtime
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -8,6 +9,11 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 
+/**
+ * [DshCredentialsSync] 的残留语义测试（v0.2.4 起该类已废弃：配置面共享化后不再需要跨目录同步）。
+ * 保留这些用例是为了保证"即使被显式调用，也不会写坏共享凭据文件"。
+ */
+@Suppress("DEPRECATION")
 class DshCredentialsSyncTest {
 
     @TempDir
@@ -34,6 +40,24 @@ class DshCredentialsSyncTest {
     @Test
     fun `resolveSync returns project key when global absent`() {
         assertEquals("sk-first-1234567890", DshCredentialsSync(tmp.resolve(".credentials.yaml")).resolveSync("sk-first-1234567890", null))
+    }
+
+    // ---- v0.2.4：类已废弃，register 必须是空操作（不再启动任何 watch）----
+
+    @Test
+    fun `register is a no-op in shared-config mode`() {
+        val file = tmp.resolve(".credentials.yaml")
+        Files.writeString(file, "version: 1\nrefs:\n  DEEPSEEK_API_KEY: sk-a\n", StandardCharsets.UTF_8)
+        assertNull(DshCredentialsSync.register("proj", file), "register must not create a watcher anymore")
+        DshCredentialsSync.release("proj") // 幂等，不抛
+    }
+
+    @Test
+    fun `synced file is no longer used to write shared credentials`() {
+        // onFileChanged 只读 key（这里文件不存在 → 直接返回，绝不能抛或创建共享文件）
+        val missing = tmp.resolve("nope/.credentials.yaml")
+        DshCredentialsSync(missing).onFileChanged()
+        assertFalse(Files.exists(missing.parent))
     }
 
     // ---- start() 注册 watch（纯生命周期，不触发 Platform 心跳）----

@@ -60,4 +60,46 @@ class DshHomeManagerRuntimeRootTest {
         assertTrue(DshHomeManager.samePath("", ""))
         assertFalse(DshHomeManager.samePath(null, "C:/x"))
     }
+
+    // ---- v0.2.4：共享配置根解析（纯逻辑） ——
+    // 与运行时目录不同，共享根**不要求预先存在**（首次使用会创建），但必须是绝对路径。
+
+    @Test
+    fun `shared root falls back when unset`() {
+        val fallback = tmp.resolve("dsh-home")
+        assertEquals(fallback, DshHomeManager.resolveSharedConfigRoot(null, fallback))
+        assertEquals(fallback, DshHomeManager.resolveSharedConfigRoot("", fallback))
+        assertEquals(fallback, DshHomeManager.resolveSharedConfigRoot("   ", fallback))
+    }
+
+    @Test
+    fun `shared root accepts an absolute path that does not exist yet`() {
+        val fallback = tmp.resolve("dsh-home")
+        val custom = tmp.resolve("custom-shared")
+        assertFalse(Files.exists(custom), "precondition: the override directory must not exist")
+        assertEquals(custom, DshHomeManager.resolveSharedConfigRoot(custom.toString(), fallback))
+    }
+
+    @Test
+    fun `shared root falls back on a relative or malformed path`() {
+        val fallback = tmp.resolve("dsh-home")
+        assertEquals(fallback, DshHomeManager.resolveSharedConfigRoot("relative/dir", fallback))
+        assertEquals(fallback, DshHomeManager.resolveSharedConfigRoot("\u0000bad", fallback))
+    }
+
+    @Test
+    fun `shared root normalizes the override path`() {
+        val fallback = tmp.resolve("dsh-home")
+        val custom = tmp.resolve("custom-shared")
+        assertEquals(custom, DshHomeManager.resolveSharedConfigRoot("$custom/sub/..".replace('/', java.io.File.separatorChar), fallback))
+    }
+
+    @Test
+    fun `project dir name pattern only matches 16 hex chars`() {
+        assertTrue(DshHomeManager.PROJECT_DIR_NAME.matches("0123456789abcdef"))
+        assertFalse(DshHomeManager.PROJECT_DIR_NAME.matches("0123456789ABCDEF"), "md5 hex is lowercase")
+        assertFalse(DshHomeManager.PROJECT_DIR_NAME.matches("0123456789abcde"), "15 chars is not a project home")
+        assertFalse(DshHomeManager.PROJECT_DIR_NAME.matches("migrated"))
+        assertFalse(DshHomeManager.PROJECT_DIR_NAME.matches("0123456789abcdef0"), "17 chars is not a project home")
+    }
 }

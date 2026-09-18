@@ -11,7 +11,7 @@ plugins {
 }
 
 group = "com.deepseek.harness"
-version = "0.2.3"
+version = "0.2.4"
 
 repositories {
     mavenCentral()

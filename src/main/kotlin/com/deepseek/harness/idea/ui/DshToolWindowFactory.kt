@@ -95,6 +95,10 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
         /** JBCefJSQuery 回传里标记"来自 dsh 弹窗的 API Key"的前缀（与一键发送结果区分）。 */
         const val APIKEY_PREFIX = "__apikey__"
 
+        /** 回传结果的来源类别：发送选中代码（只填输入框） / 一键解释（填并自动提交）。 */
+        private const val KIND_SELECTION = "selection"
+        private const val KIND_QUESTION = "question"
+
         /** 通过工具窗口主 content（index 0）查找当前项目的面板（SendSelectionAction/SendLogExplanationAction 共用）。 */
         fun find(project: Project): DshToolWindowPanel? {
             val tw = com.intellij.openapi.wm.ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)
@@ -139,6 +143,13 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
 
     /** 每次发送的单调 token，用于丢弃过期回调。 */
     private val sendToken = AtomicLong(0)
+
+    /** 最近一次"发送选中代码"的引用与其时间戳（同一引用短时间窗内重复触发时不再重复注入）。 */
+    @Volatile
+    private var lastSelectionRef: String? = null
+
+    @Volatile
+    private var lastSelectionAt: Long = 0L
 
     init {
         add(buildPlaceholderCard(), CARD_PLACEHOLDER)
@@ -311,20 +322,13 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
             try {
                 // 项目根目录：作为工作空间（dsh 注册）与 DSH_HOME 隔离标识（v0.1.3-dev 切换项目修复）
                 val projectRoot = project.basePath ?: ""
-                // 方案 A：先更新全局 .credentials.yaml，再 ensureHome 把全局配置同步到子目录
-                // （key 真源 = PasswordSafe + 全局 .credentials.yaml；不再向 dsh 进程注入
-                //   DEEPSEEK_API_KEY 环境变量 —— dsh-credentials-local 的 inherited env wins 会遮蔽
-                //   Web UI 写入，并使 Web UI 改 key 被 assertUnshadowed 拒绝）。
-                homeManager.syncCredentials()
+                // v0.2.4：配置面（settings/credentials/agent-presets/技能）在共享配置根，由 ide.yml 的
+                // `- id: <rowId>` patch 指向，dsh 直接读写共享文档；插件不再做"复制到子目录 + 文件监听同步"。
+                // 顺序：先 ensureHome（含一次性配置迁移、共享 MCP 脚本部署），再同步 PasswordSafe 的 API Key。
                 homeManager.ensureHome(projectRoot)
+                homeManager.syncCredentials()
                 val homePath = homeManager.homeDir(projectRoot)
                 val home = homePath.toFile()
-
-                // dsh Web UI 改 key 监听：dsh 写当前项目 DSH_HOME/.credentials.yaml → 回写
-                // PasswordSafe + 全局，使其它项目下次启动/重启全局一致（方案 B）。
-                com.deepseek.harness.idea.runtime.DshCredentialsSync.register(
-                    project.name, homePath.resolve(".credentials.yaml")
-                )
 
                 // Step 3：MCP 桥接编排（bridge + mcp-ide-server + ide.yml patch）
                 val bridge = DshBridgeManager(
@@ -348,10 +352,7 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
                         put("DSH_IDE_BRIDGE_URL", bridge.bridgeUrl())
                         put("DSH_IDE_TOKEN", bridge.bridgeToken())
                         put("DSH_LOG_LEVEL", com.deepseek.harness.idea.settings.DshSettingsState.getInstance().logLevel)
-                        // 注意：不再注入 DEEPSEEK_API_KEY 环境变量。dsh-credentials-local 的
-                        // resolve() 是 inherited env wins；一旦注入，dsh 永远读 env 旧值，且 Web UI
-                        // 改 key 会被 assertUnshadowed 拒绝。key 真源为 PasswordSafe + 全局
-                        // .credentials.yaml，由 DshCredentialsSync 在 Web UI 改动时回写全局。
+                        // 注意：不注入 DEEPSEEK_API_KEY 环境变量（见 DshHomeManager.syncCredentials 注释）。
                     },
                 )
                 processManager = manager
@@ -395,7 +396,6 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
         browser = null
         com.deepseek.harness.idea.runtime.DshLifecycleManager.getInstance().unregisterPanel(project.name)
         com.deepseek.harness.idea.runtime.DshRuntimeRegistry.getInstance().release(project.name)
-        com.deepseek.harness.idea.runtime.DshCredentialsSync.release(project.name)
     }
 
     fun restart() {
@@ -413,77 +413,66 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
 
     /**
      * 发送选中代码到 DSH（Step 4 + 紧凑引用）：
-     * 1. 直接写入 Bridge 的 sent-selection 队列（智能体可随时经 ide_get_sent_selection 取回，必达；
-     *    队列存完整代码，供智能体按需读取）；
-     * 2. 聚焦工具窗口并尝试 JCEF 注入：输入框填入**紧凑文件引用** `@路径#L起始-结束` + 换行，
-     *    光标自动落到下一行等待输入问题（无提示语、无代码本体）；
+     * 1. 直接写入 Bridge 的 sent-selection 队列（智能体可随时经 ide_get_sent_selection 取回，必达）；
+     * 2. 聚焦工具窗口并注入输入框：填入**紧凑文件引用** `@路径#L起始-结束` + 换行，光标落到下一行等用户输入；
      * 3. 注入失败/未运行 → 剪贴板（同样紧凑引用）+ 通知降级。
+     *
+     * v0.2.4：注入改为[通用 composer 脚本][ComposerScripts.build]（兼容 dsh 0.1.5 的 Lexical contenteditable），
+     * 并经 JBCefJSQuery 回传确定结果（`injected` / `notfound` / `failed`），不再靠"脚本已下发"乐观提示。
+     *
+     * **重复引用防护**：dsh 的输入框是**累积**内容（注入是"追加"而非"替换"），而右键菜单/快捷键可能
+     * 在极短时间内触发两次（双击），导致同一条引用被追加两遍。这里用"同一引用 + 短时间窗"去重
+     * （[SendSelectionRefs.DEDUPE_WINDOW_MS]）；编辑器侧另有"已包含该引用则不重复写入"的兜底（见 `ComposerScripts`）。
      */
     fun sendSelection(filePath: String?, language: String?, selection: String, lineStart: Int, lineEnd: Int) {
         val bridge = bridgeManager
         if (bridge != null) {
             bridge.pushSentSelection(filePath, language, selection, lineStart, lineEnd)
         }
-        val panel = this
-        val ref = buildCompactReference(filePath, lineStart, lineEnd)
+        val ref = SendSelectionRefs.compactReference(filePath, lineStart, lineEnd)
+        // 同一引用的短时间窗去重（双击 / 重复触发）：引用本身仍然进 Bridge 队列，只是不再重复注入。
+        if (isDuplicateSelection(ref)) {
+            LOG.info("duplicate send-selection within ${SendSelectionRefs.DEDUPE_WINDOW_MS}ms; skipping composer injection")
+            return
+        }
         ApplicationManager.getApplication().invokeLater {
             // 聚焦工具窗口
             com.intellij.openapi.wm.ToolWindowManager.getInstance(project)
                 .getToolWindow(TOOL_WINDOW_ID)?.activate(null)
-            val injected = injectToBrowser(ref)
-            if (!injected) {
+            val funcName = jsQuery?.getFuncName()
+            // 覆盖上一次在途的等待态（token 变化使旧回调自动失效），新的注入结果才是我们要的
+            pendingSend = PendingSend(sendToken.incrementAndGet(), ref, KIND_SELECTION)
+            val ok = executeInPage(ComposerScripts.build(ref, submit = false, funcName = funcName))
+            if (!ok) {
+                pendingSend = null
                 copyToClipboard(ref)
                 showNotification(DshBundle.message("sendSelection.clipboard"))
-            } else {
+                return@invokeLater
+            }
+            if (funcName == null) {
+                // 无回传通道：无法验证，按"已尝试注入"提示
+                pendingSend = null
                 showNotification(DshBundle.message("sendSelection.done"))
             }
         }
     }
 
-    /** 构造紧凑引用：`@绝对路径#L起始-结束` + 尾随换行（光标落下一行，无提示语）。 */
-    private fun buildCompactReference(filePath: String?, lineStart: Int, lineEnd: Int): String {
-        if (filePath.isNullOrBlank()) return ""
-        val sb = StringBuilder()
-        sb.append('@').append(filePath.replace('\\', '/'))
-        if (lineEnd > 0) {
-            sb.append("#L").append(lineStart)
-            if (lineEnd > lineStart) sb.append('-').append(lineEnd)
-        }
-        sb.append('\n')
-        return sb.toString()
-    }
-
-    /** JCEF 注入：轮询 dsh web 的 composer textarea，设置值、触发 React input 事件、光标移到末尾（下一行）。 */
-    private fun injectToBrowser(selection: String): Boolean {
-        val json = escapeJs(selection)
-        val script = """
-            (() => {
-              const deadline = Date.now() + 8000;
-              const text = $json;
-              const tryInject = () => {
-                const ta = document.querySelector('textarea');
-                if (!ta) { if (Date.now() < deadline) setTimeout(tryInject, 300); return; }
-                const proto = window.HTMLTextAreaElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-                setter.call(ta, text);
-                ta.dispatchEvent(new Event('input', { bubbles: true }));
-                // 光标移到文本末尾（引用行之后的新行），等待直接输入问题
-                const pos = ta.value.length;
-                ta.setSelectionRange(pos, pos);
-                ta.focus();
-              };
-              tryInject();
-            })();
-        """.trimIndent()
-        return executeInPage(script)
+    /** 同一引用在 [SendSelectionRefs.DEDUPE_WINDOW_MS] 内再次到达 → 判定为重复触发（不重复注入）。 */
+    private fun isDuplicateSelection(ref: String): Boolean {
+        if (ref.isBlank()) return false
+        val now = System.currentTimeMillis()
+        val duplicate = SendSelectionRefs.isDuplicate(ref, lastSelectionRef, lastSelectionAt, now)
+        lastSelectionRef = ref
+        lastSelectionAt = now
+        return duplicate
     }
 
     /**
      * 一键发送问题到 DSH（自动提交，不等待用户确认）：
      * 1. 守卫：在途防重；DSH 未运行 → 剪贴板 + 通知；浏览器缺失 → 剪贴板 + 通知；
      * 2. 激活工具窗口并切到对话页（主 content 是第一个，避免停在日志 tab）；
-     * 3. JCEF 注入：composer 填入完整问题 + 派发回车自动提交；JBCefJSQuery 回传
-     *    `submitted` / `blocked` / `no-composer` 结果（无通道时乐观提示）；
+     * 3. 注入 composer 并自动提交；JBCefJSQuery 回传
+     *    `submitted` / `blocked` / `notfound` / `failed`（无通道时乐观提示）；
      * 4. 成功 → 通知已发送；blocked → 消息留在输入框 + 提示手动回车；失败 → 剪贴板兜底。
      */
     fun sendQuestion(text: String) {
@@ -492,15 +481,17 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
             return
         }
         val token = sendToken.incrementAndGet()
-        pendingSend = PendingSend(token, text)
+        pendingSend = PendingSend(token, text, KIND_QUESTION)
         ApplicationManager.getApplication().invokeLater {
             try {
                 if (!isRunning()) {
+                    pendingSend = null
                     copyToClipboard(text)
                     showNotification(DshBundle.message("sendLogExplanation.notRunning"))
                     return@invokeLater
                 }
                 if (browser == null) {
+                    pendingSend = null
                     copyToClipboard(text)
                     showNotification(DshBundle.message("sendLogExplanation.failed"))
                     return@invokeLater
@@ -513,8 +504,8 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
                     if (main != null) cm.setSelectedContent(main, true)
                 }
                 val funcName = jsQuery?.getFuncName()
-                val script = buildSendQuestionScript(text, funcName)
-                if (!executeInPage(script)) {
+                if (!executeInPage(ComposerScripts.build(text, submit = true, funcName = funcName))) {
+                    pendingSend = null
                     copyToClipboard(text)
                     showNotification(DshBundle.message("sendLogExplanation.failed"))
                     return@invokeLater
@@ -530,63 +521,26 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
         }
     }
 
-    /** 一键发送注入脚本：填 composer → 派发回车 → 轮询判定结果 → window.<funcName> 回传。 */
-    private fun buildSendQuestionScript(text: String, funcName: String?): String {
-        val json = escapeJs(text)
-        val report = if (funcName != null) {
-            "const report = (o) => { try { window.$funcName({ request: o, onSuccess: () => {}, onFailure: () => {} }); } catch (e) {} };"
-        } else {
-            "const report = () => {};"
+    /** 注入结果处理（EDT）。[kind] 区分「发送选中代码」与「一键解释」。 */
+    private fun handleSendOutcome(text: String, outcome: String, kind: String) {
+        if (kind == KIND_SELECTION) {
+            when (outcome) {
+                "injected" -> showNotification(DshBundle.message("sendSelection.done"))
+                else -> { // notfound / failed / 未知 → 剪贴板兜底
+                    copyToClipboard(text)
+                    showNotification(DshBundle.message("sendSelection.clipboard"))
+                }
+            }
+            return
         }
-        return """
-            (() => {
-              const deadline = Date.now() + 8000;
-              const text = $json;
-              $report
-              const tryInject = () => {
-                const ta = document.querySelector('textarea');
-                if (!ta) { if (Date.now() < deadline) setTimeout(tryInject, 300); else report('no-composer'); return; }
-                const proto = window.HTMLTextAreaElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-                setter.call(ta, text);
-                ta.dispatchEvent(new Event('input', { bubbles: true }));
-                setTimeout(() => {
-                  // 回车提交（dsh composer：非 shift 的 Enter → keyboard.submit；智能体忙时入队仍送达）
-                  ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
-                  const t0 = Date.now();
-                  const clickSend = () => {
-                    // 仅匹配"发送"按钮（发送/发送消息）；绝不用 class 通配，避免误点运行中的"停止"按钮
-                    const btn = document.querySelector('button[aria-label="Send message"], button[aria-label="发送消息"], button[aria-label="Send"], button[aria-label="发送"]');
-                    if (btn && !btn.disabled) { btn.click(); return true; }
-                    return false;
-                  };
-                  const checkCleared = () => {
-                    const cur = document.querySelector('textarea');
-                    return !cur || cur.value.trim() === '';
-                  };
-                  const poll = () => {
-                    if (checkCleared()) { report('submitted'); return; }
-                    if (Date.now() - t0 < 3000) { setTimeout(poll, 250); return; }
-                    if (clickSend()) {
-                      setTimeout(() => { report(checkCleared() ? 'submitted' : 'blocked'); }, 500);
-                    } else {
-                      report('blocked');
-                    }
-                  };
-                  setTimeout(poll, 400);
-                }, 0);
-              };
-              tryInject();
-            })();
-        """.trimIndent()
-    }
-
-    /** JBCefJSQuery 结果处理（EDT）。 */
-    private fun handleSendOutcome(text: String, outcome: String) {
         when (outcome) {
             "submitted" -> showNotification(DshBundle.message("sendLogExplanation.done"))
             "blocked" -> showNotification(DshBundle.message("sendLogExplanation.blocked"))
-            else -> { // "no-composer" / 未知 → 剪贴板兜底
+            "notfound" -> { // 找不到输入框（dsh 前端改版/页面未就绪）→ 剪贴板兜底
+                copyToClipboard(text)
+                showNotification(DshBundle.message("sendLogExplanation.notfound"))
+            }
+            else -> { // "failed" / 未知 → 剪贴板兜底
                 copyToClipboard(text)
                 showNotification(DshBundle.message("sendLogExplanation.failed"))
             }
@@ -605,21 +559,6 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
             LOG.warn("JCEF executeJavaScript failed", e)
             false
         }
-    }
-
-    private fun escapeJs(s: String): String {
-        val sb = StringBuilder("\"")
-        for (c in s) {
-            when (c) {
-                '"' -> sb.append("\\\"")
-                '\\' -> sb.append("\\\\")
-                '\n' -> sb.append("\\n")
-                '\r' -> sb.append("\\r")
-                '\t' -> sb.append("\\t")
-                else -> if (c < ' ') sb.append("\\u%04x".format(c.code)) else sb.append(c)
-            }
-        }
-        return sb.append('"').toString()
     }
 
     private fun copyToClipboard(text: String) {
@@ -792,7 +731,7 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
                         ApplicationManager.getApplication().invokeLater {
                             if (pendingSend === pending) {
                                 pendingSend = null
-                                handleSendOutcome(pending.text, payload)
+                                handleSendOutcome(pending.text, payload, pending.kind)
                             }
                         }
                     }
@@ -907,8 +846,8 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
     }
 }
 
-/** 一次"一键发送"的等待态（token 用于丢弃过期回调，text 用于失败时剪贴板兜底）。 */
-private class PendingSend(val token: Long, val text: String)
+/** 一次"发送到 composer"的等待态（token 用于丢弃过期回调，text 用于失败时剪贴板兜底）。 */
+private class PendingSend(val token: Long, val text: String, val kind: String)
 
 class OpenSettingsAction : AnAction(DshBundle.message("action.settings"), null, com.intellij.icons.AllIcons.General.Settings) {
     override fun actionPerformed(e: AnActionEvent) {

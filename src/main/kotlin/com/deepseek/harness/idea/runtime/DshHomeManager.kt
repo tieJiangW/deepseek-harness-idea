@@ -9,16 +9,26 @@ import com.intellij.openapi.diagnostic.Logger
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 
 /**
  * DSH 运行时与 DSH_HOME 管理（应用级服务）。
  *
  * 目录布局（见 docs/DESIGN.md §4.4）：
  * - 运行时根：环境变量 `DSH_IDEA_RUNTIME`（开发态覆盖）或
- *   `<config>/dsh-idea/runtime/<version>`（生产态，Step 5 从插件资源解压）。
- *   内含 `node/`（Node.js）与 `dsh/`（npm 安装的 @deepseek-ai/dsh 树）。
- * - DSH_HOME：`<config>/dsh-idea/dsh-home`，其中 profiles/web/package.json 声明 bundle；
- *   dsh 首次启动时自愈创建 profiles/node_modules 的 junction 指向 dsh 树。
+ *   `<config>/dsh-idea/runtime/<version>`（生产态从插件资源解压/下载）。
+ *   内含 `node/`（Node.js）、`dsh/`（npm 安装的 @deepseek-ai/dsh 树）与
+ *   `.dsh-ide-bridge/mcp-ide-server.mjs`（全局唯一一份 MCP 脚本）。
+ * - **共享配置根** [sharedConfigRoot]：`<config>/dsh-idea/dsh-home`，dsh 的**用户级配置面**唯一真源
+ *   （`settings.yaml`、`.credentials.yaml`、`.agent-presets/`、`skills/`），所有项目共享；
+ *   由 `ide.yml` 的 `- id: settings` / `- id: credentials` / `- id: agent-presets` /
+ *   `- id: skill-filesystem` patch 指向（见 [com.deepseek.harness.idea.mcp.McpPatchGenerator]）。
+ * - **每项目 DSH_HOME** [homeDir]：`<共享配置根>/<md5(项目路径)前16位>`，只承载 dsh 的**数据面**
+ *   （`sessions/`、`storages/`、`profiles/web/`、`ide.yml`），使工作区注册表与会话按项目隔离
+ *   （v0.1.3-dev 切换项目修复）。
+ *
+ * **v0.2.4 变更**：删除"全局配置复制到每项目子目录"（`copyGlobalConfigTo`）与每项目
+ * `node_modules` junction；配置改为经 patch 直接落在共享根，插件不再参与配置同步。
  */
 @Service(Service.Level.APP)
 class DshHomeManager : Disposable {
@@ -43,6 +53,21 @@ class DshHomeManager : Disposable {
         /** 与启动 dsh web --patch 使用的 ide.yml 文件名 */
         const val IDE_PATCH_FILE = "ide.yml"
 
+        /** MCP server 脚本名（部署在 dsh 安装树内，见 [mcpServerScript]）。 */
+        const val MCP_SERVER_SCRIPT = "mcp-ide-server.mjs"
+
+        /**
+         * MCP 脚本在运行时树内的部署目录（相对 `<运行时根>/dsh/node_modules`）。
+         *
+         * **为什么必须在这里**：脚本 `import '@modelcontextprotocol/sdk/...'` / `'zod/v4'`，
+         * Node 的 ESM 解析按**真实路径**向上逐级查找 `node_modules`，并**不越过 junction/符号链接**
+         * （实测：把脚本放在 `<运行时根>/.dsh-ide-bridge/` 并给 `<运行时根>/dsh` 建 junction 仍然报
+         * `ERR_MODULE_NOT_FOUND`）。放在 `<dsh 树>/node_modules/@deepseek-ai/dsh-ide-bridge/` 时：
+         * ① 同级 `node_modules`（即包名 `@deepseek-ai/dsh-ide-bridge` 的推断位置）→
+         * ② `<dsh 树>/node_modules`（真正命中的一级）——解析稳定，且全局只有一份脚本、**零链接**。
+         */
+        const val MCP_BRIDGE_PACKAGE = "dsh-ide-bridge"
+
         private val WEB_PROFILE_MANIFEST =
             """{"name":"dsh-profile-web","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}"""
 
@@ -51,6 +76,9 @@ class DshHomeManager : Disposable {
 
         /** dsh 内测声明 acknowledge 版本（与 dsh 源码 WELCOME_NOTICE_VERSION 一致；变化需同步）。 */
         const val WELCOME_NOTICE_VERSION = "2026-08-13.1"
+
+        /** 每项目 DSH_HOME 目录名：`md5(项目路径)` 前 16 位十六进制（应用级共享根的隔离键）。 */
+        internal val PROJECT_DIR_NAME = Regex("^[0-9a-f]{16}$")
 
         /**
          * 运行时根解析（纯逻辑，便于单测）：环境变量 > 设置页「运行时目录」> 默认目录，
@@ -66,6 +94,17 @@ class DshHomeManager : Disposable {
             return existing(envDir) ?: existing(configuredDir) ?: fallback
         }
 
+        /**
+         * 共享配置根解析（纯逻辑，便于单测）：显式覆盖目录 > 默认。
+         * 与运行时目录不同，共享根**不需要预先存在**（首次使用会创建；dsh 自身也会 `mkdir -p`）。
+         */
+        internal fun resolveSharedConfigRoot(configuredDir: String?, fallback: Path): Path {
+            val s = configuredDir?.trim().orEmpty()
+            if (s.isEmpty()) return fallback
+            val p = runCatching { Path.of(s) }.getOrNull() ?: return fallback
+            return if (p.isAbsolute) p.normalize() else fallback
+        }
+
         /** 路径等价比较（纯逻辑）：规范化绝对路径后忽略大小写与分隔符差异（Windows 大小写不敏感）。 */
         internal fun samePath(a: String?, b: String?): Boolean {
             val x = a?.trim().orEmpty()
@@ -78,6 +117,11 @@ class DshHomeManager : Disposable {
             val ny = norm(y) ?: return x.equals(y, ignoreCase = true)
             return nx.equals(ny, ignoreCase = true)
         }
+
+        /** MD5 十六进制小写（项目隔离目录名）。 */
+        private fun md5(s: String): String =
+            java.security.MessageDigest.getInstance("MD5").digest(s.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
     /**
@@ -191,7 +235,7 @@ class DshHomeManager : Disposable {
     }
 
     /** 运行期读取插件版本：来自构建期注入的 `dsh-build-info.properties`（无内部 API，见 build.gradle.kts generateBuildInfo）。 */
-    private fun pluginVersion(): String = try {
+    internal fun pluginVersion(): String = try {
         val stream = DshHomeManager::class.java.getResourceAsStream(BUILD_INFO_RESOURCE)
             ?: run { LOG.warn("$BUILD_INFO_RESOURCE not found; runtime download version falls back to empty"); return "" }
         val props = java.util.Properties().apply { load(stream) }
@@ -219,7 +263,7 @@ class DshHomeManager : Disposable {
         return try {
             Files.createDirectories(target)
             val tmpZip = target.resolveSibling("runtime-bundle-${System.nanoTime()}.zip")
-            stream.use { src -> Files.copy(src, tmpZip, java.nio.file.StandardCopyOption.REPLACE_EXISTING) }
+            stream.use { src -> Files.copy(src, tmpZip, StandardCopyOption.REPLACE_EXISTING) }
             RuntimeArchive.unzip(tmpZip, target)
             Files.deleteIfExists(tmpZip)
             RuntimeProvisioner.isPresent(target)
@@ -229,45 +273,79 @@ class DshHomeManager : Disposable {
         }
     }
 
-    /**
-     * 独立 DSH_HOME（会话数据持久化；按项目隔离，不随运行时版本变化）。
-     *
-     * v0.1.3-dev（切换项目工作区修复）：每个项目使用独立目录（MD5(projectPath) 前 16 位），
-     * 使 dsh 的工作区注册表（workspace.json）与会话数据按项目隔离——切换项目后 dsh 进程的
-     * 工作区从当前项目"白纸"开始，从机制上杜绝"显示其他项目工作区"（用户实测：仅旧项目复现，
-     * 全新项目无问题，因为 dsh 记住了既有 workspace 的历史会话状态）。
-     */
-    /**
-     * 全局配置目录（方案 C：dsh 配置全局化）——`.credentials.yaml` / `settings.yaml` 的
-     * **唯一真源**，所有项目共享；每项目启动时通过 ide.yml patch 把 dsh 的
-     * `settings-file.path` / `credentials-local.path` 指向这里，实现"配置共享 + 数据隔离"。
-     */
-    fun globalConfigHome(): Path = PathManager.getConfigDir().resolve("dsh-idea").resolve("dsh-home")
+    // ---- 共享配置根（v0.2.4） ----
 
+    /**
+     * 共享配置根：`<config>/dsh-idea/dsh-home`。
+     *
+     * 这是 dsh **用户级配置面**的唯一真源（`settings.yaml` / `.credentials.yaml` /
+     * `.agent-presets/` / `skills/`），由 `ide.yml` patch 指向，所有项目共享；也是每项目
+     * DSH_HOME 的父目录（数据面仍按项目隔离）。
+     *
+     * 路径沿用 v0.1.3-dev 以来的全局根，避免丢失用户既有的语言偏好与内测声明接受状态。
+     */
+    fun sharedConfigRoot(): Path =
+        resolveSharedConfigRoot(
+            com.deepseek.harness.idea.settings.DshSettingsState.getInstance().dshHomeOverride,
+            PathManager.getConfigDir().resolve("dsh-idea").resolve("dsh-home"),
+        )
+
+    /** 共享设置文档：`<共享根>/settings.yaml`（dsh `dsh-settings-file` 的 `path`）。 */
+    fun sharedSettingsPath(): Path = sharedConfigRoot().resolve(SharedConfigMigrator.SETTINGS_FILE)
+
+    /** 共享凭据文档：`<共享根>/.credentials.yaml`（dsh `dsh-credentials-local` 的 `path`）。 */
+    fun sharedCredentialsPath(): Path = sharedConfigRoot().resolve(SharedConfigMigrator.CREDENTIALS_FILE)
+
+    /** 共享 Agent 预设根：`<共享根>/.agent-presets`（dsh `dsh-agent-presets` 的 user root）。 */
+    fun sharedAgentPresetsRoot(): Path = sharedConfigRoot().resolve(".agent-presets")
+
+    /** 共享用户技能根：`<共享根>/skills`（dsh `dsh-skill-filesystem` 的 `dshHome` 下 skills）。 */
+    fun sharedSkillsRoot(): Path = sharedConfigRoot().resolve("skills")
+
+    /** 每项目 DSH_HOME：`<共享根>/<md5(项目路径)前16位>`（数据面隔离，见类注释）。 */
     fun homeDir(projectPath: String): Path {
         val safe = if (projectPath.isBlank()) "default" else md5(projectPath).take(16)
-        return globalConfigHome().resolve(safe)
+        return sharedConfigRoot().resolve(safe)
     }
 
-    private fun md5(s: String): String =
-        java.security.MessageDigest.getInstance("MD5").digest(s.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    /** 共享根下已存在的每项目 DSH_HOME 目录（迁移遍历用）。 */
+    internal fun projectHomes(): List<Path> {
+        val root = sharedConfigRoot()
+        if (!Files.isDirectory(root)) return emptyList()
+        return Files.newDirectoryStream(root).use { entries ->
+            entries.filter { Files.isDirectory(it, java.nio.file.LinkOption.NOFOLLOW_LINKS) && PROJECT_DIR_NAME.matches(it.fileName.toString()) }
+        }
+    }
 
     /**
-     * 幂等创建 DSH_HOME 骨架：
-     * - profiles/web/（package.json + cordis.yml + cordis.patch.yml）
-     * - ide.yml（--patch 覆盖层占位）
-     * - 顶层 node_modules junction → runtime dsh 树（mcp-ide-server.mjs 从 DSH_HOME 顶层
-     *   解析 @modelcontextprotocol/sdk；dsh 自愈的 profiles/node_modules 不会被 ESM 向上查找命中）
-     * - mcp-ide-server.mjs（插件资源部署）
+     * 幂等创建某项目的 DSH_HOME 骨架（**只建数据面**，不写配置）：
+     * - `profiles/web/`（package.json + cordis.yml + cordis.patch.yml）
+     * - `ide.yml`（`--patch` 覆盖层占位，随后由 `DshBridgeManager` 覆盖写入）
+     * - 共享根：部署全局唯一的 MCP 脚本、清理 v0.1.2 遗留、执行一次性配置迁移
+     *
+     * v0.2.4 起**不再**向项目目录复制 `settings.yaml` / `.credentials.yaml`，也**不再**建
+     * `node_modules` junction（配置面由 patch 指向共享根，MCP 脚本依赖由运行时树解析）。
      */
     fun ensureHome(projectPath: String): Path {
-        // 全局配置目录：.credentials.yaml / settings.yaml 唯一真源（所有项目共享，由 ide.yml patch 指向）
-        val ghome = globalConfigHome()
-        Files.createDirectories(ghome)
-        prefillAcknowledgeWelcomeNotice()
+        val shared = sharedConfigRoot()
+        Files.createDirectories(shared)
 
-        // 每项目子目录 DSH_HOME（数据隔离；storages/sessions 由 dsh 创建；不写独立配置）
+        // 全局唯一 MCP 脚本（解析依赖靠运行时树，无需任何 junction）
+        ensureMcpServerScript(shared)
+
+        // v0.1.2 遗留（共享根曾同时是全局 DSH_HOME）+ 每项目遗留 junction/脚本清理
+        SharedConfigMigrator.cleanLegacySharedRoot(shared)
+
+        // 一次性配置迁移：项目目录 settings/credentials → 合并进共享文档并备份原文件
+        val outcome = SharedConfigMigrator.migrateIfNeeded(shared, projectHomes(), pluginVersion())
+        if (outcome.ran) {
+            LOG.info(
+                "shared-config migration: seeded=${outcome.seededSettings} projects=${outcome.migratedProjects} " +
+                    "namespaces=${outcome.mergedNamespaces} credentials=${outcome.mergedCredentials} failures=${outcome.failures}"
+            )
+        }
+
+        // 每项目 DSH_HOME（数据面）
         val home = homeDir(projectPath)
         val web = home.resolve("profiles/web")
         Files.createDirectories(web)
@@ -276,24 +354,56 @@ class DshHomeManager : Disposable {
         writeIfAbsent(web.resolve("cordis.yml"), "[]\n")
         writeIfAbsent(web.resolve("cordis.patch.yml"), "# 本层由插件通过 --patch 覆盖，不在此修改\n[]\n")
         writeIfAbsent(home.resolve(IDE_PATCH_FILE), "[]\n")
-        ensureTopLevelNodeModules(home)
-        deployMcpServer(home)
-        // 方案 A：把全局唯一配置复制到本子目录（dsh 从子目录读；全局为真源；dsh 内改动下次启动被全局覆盖）
-        copyGlobalConfigTo(home)
-        // 升级迁移：v0.1.2 全局 DSH_HOME 的 session 数据 → 当前项目隔离目录（幂等；workspace 由 dsh 自动重建）
+
+        cleanLegacyProjectHome(home)
+        prefillAcknowledgeWelcomeNotice()
         migrateLegacySessions(home, projectPath)
         return home
     }
 
     /**
-     * 旧版（v0.1.2）在全局 DSH_HOME 根（= [globalConfigHome]）下存 session；新版改为每项目隔离目录。
+     * 清理项目 DSH_HOME 里的 v0.1.3-dev~v0.2.3 遗留：
+     * - 顶层 `node_modules` junction（曾供 MCP 脚本 ESM 解析 SDK；v0.2.4 起脚本在运行时树内解析）
+     * - 顶层 `mcp-ide-server.mjs`（曾按项目部署）
+     *
+     * `settings.yaml` / `.credentials.yaml` 由 [SharedConfigMigrator] 搬入备份目录（保留原文件，
+     * 失败下次启动重试），此处**不动**，避免迁移失败时造成不可恢复的丢失。
+     *
+     * **junction 必须断链**（保留原始目标），否则会删空运行时树（见 PROJECT_NOTES §4）。
+     */
+    private fun cleanLegacyProjectHome(home: Path) {
+        val nodeModules = home.resolve("node_modules")
+        if (Files.exists(nodeModules, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            try {
+                val attrs = Files.readAttributes(
+                    nodeModules, java.nio.file.attribute.BasicFileAttributes::class.java,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS,
+                )
+                if (attrs.isSymbolicLink || attrs.isOther) {
+                    Files.deleteIfExists(nodeModules)
+                    LOG.info("removed legacy DSH_HOME/node_modules link (no longer needed): $nodeModules")
+                }
+            } catch (e: Exception) {
+                LOG.warn("failed to unlink legacy node_modules at $nodeModules", e)
+            }
+        }
+        val legacyScript = home.resolve(MCP_SERVER_SCRIPT)
+        if (Files.isRegularFile(legacyScript, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            runCatching { Files.deleteIfExists(legacyScript) }
+                .onSuccess { LOG.info("removed legacy per-project $MCP_SERVER_SCRIPT: $legacyScript") }
+                .onFailure { LOG.warn("failed to remove legacy $legacyScript", it) }
+        }
+    }
+
+    /**
+     * 旧版（v0.1.2）在全局 DSH_HOME 根（= [sharedConfigRoot]）下存 session；新版改为每项目隔离目录。
      * 把旧全局 `sessions/<projectKey(projectPath)>` 复制到本子目录（含投影缓存 `session_projcache.json`），
      * 使用户升级后旧会话仍可见且标题正确（dsh 的 `session.list` 用零 I/O 投影缓存读标题，需一并迁移）。
      * 仅当全局根下存在对应项目目录且子目录数据尚未迁移时复制（幂等）。
      */
     private fun migrateLegacySessions(home: Path, projectPath: String) {
         if (projectPath.isBlank()) return
-        val oldRoot = globalConfigHome()
+        val oldRoot = sharedConfigRoot()
         if (!Files.isDirectory(oldRoot.resolve("sessions"))) return
         try {
             LegacySessionMigrator.migrateProject(oldRoot, home, projectPath)
@@ -303,96 +413,115 @@ class DshHomeManager : Disposable {
         }
     }
 
-    /** 把全局配置文件（.credentials.yaml / settings.yaml）复制到子目录（幂等；仅当全局存在）。 */
-    private fun copyGlobalConfigTo(home: Path) {
-        val g = globalConfigHome()
-        for (name in listOf(".credentials.yaml", "settings.yaml")) {
-            val src = g.resolve(name)
-            if (Files.exists(src)) {
-                Files.createDirectories(home)
-                Files.copy(src, home.resolve(name), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-            }
-        }
-    }
-
-    /** 预写全局 settings.yaml：ui-onboarding.welcomeNoticeVersion = 已接受版本（文件已存在则不覆盖）。 */
+    /** 共享 `settings.yaml` 首次创建时预写 `ui-onboarding.welcomeNoticeVersion`（已存在则不覆盖）。 */
     private fun prefillAcknowledgeWelcomeNotice() {
-        val f = globalConfigHome().resolve("settings.yaml")
+        val f = sharedSettingsPath()
         if (Files.exists(f)) return
-        writeUtf8(f, "ui-onboarding:\n  welcomeNoticeVersion: \"$WELCOME_NOTICE_VERSION\"\n")
-        LOG.info("prefilled settings.yaml welcomeNoticeVersion=$WELCOME_NOTICE_VERSION")
+        runCatching {
+            writeUtf8(f, "ui-onboarding:\n  welcomeNoticeVersion: \"$WELCOME_NOTICE_VERSION\"\n")
+            LOG.info("prefilled shared settings.yaml welcomeNoticeVersion=$WELCOME_NOTICE_VERSION")
+        }.onFailure { LOG.warn("failed to prefill shared settings.yaml", it) }
     }
 
-    /** 顶层 node_modules junction（缺失才建；指向运行时 dsh 树，供 mcp-ide-server.mjs 解析 SDK）。 */
-    private fun ensureTopLevelNodeModules(home: Path) {
-        val link = home.resolve("node_modules")
-        if (Files.exists(link)) return
-        val target = runtimeRoot().resolve("dsh/node_modules")
-        if (!Files.isDirectory(target)) {
-            LOG.warn("runtime dsh tree missing: $target")
-            return
-        }
-        try {
-            Files.createSymbolicLink(link, target)
-            LOG.info("created DSH_HOME/node_modules junction -> $target")
+    /**
+     * 部署全局唯一的 `mcp-ide-server.mjs`（幂等：内容相同跳过）。
+     *
+     * 目标：`<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/mcp-ide-server.mjs`。
+     * 该位置向上查找 `node_modules` 会命中 `<运行时根>/dsh/node_modules/`（dsh 自身依赖树，
+     * 含 `@modelcontextprotocol/sdk` 与 `zod`），因此**无需任何 junction**，且全局只有一份脚本。
+     *
+     * 注意：Node 的 ESM 解析**不越过 junction**（实测），所以脚本必须真正落在 dsh 树内部，
+     * 不能靠"给运行时根建链接"来凑解析路径。
+     */
+    private fun ensureMcpServerScript(shared: Path) {
+        val resource = try {
+            IdeBridgeResources.mcpServerScript()
         } catch (e: Exception) {
-            // 沙箱/权限受限时，Windows 退回 cmd mklink /J（junction 不需要管理员）；
-            // Unix 上 createSymbolicLink 通常无需管理员即可成功，此处不调用 Windows 专用命令。
-            if (Platform.current().os != Platform.Os.WINDOWS) {
-                LOG.warn("failed to create node_modules symlink $link -> $target (unix)", e)
-                return
-            }
-            try {
-                val p = ProcessBuilder("cmd", "/c", "mklink", "/J", link.toString(), target.toString())
-                    .redirectErrorStream(true)
-                    .start()
-                p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)
-                if (Files.exists(link)) LOG.info("created DSH_HOME/node_modules junction via mklink -> $target")
-                else LOG.warn("mklink junction failed for $link -> $target")
-            } catch (e2: Exception) {
-                LOG.warn("failed to create node_modules junction $link", e2)
-            }
-        }
+            LOG.warn("failed to read bundled mcp-ide-server.mjs", e)
+            null
+        } ?: return
+
+        val target = mcpServerScript()
+        if (deployScript(resource, target)) return
+
+        // 运行时树只读（如 DSH_IDEA_RUNTIME 指向只读目录）：无法部署 → MCP 工具不可用，
+        // 但 Web UI 与对话不受影响（DshBridgeManager 已容忍脚本缺失）。仅记日志。
+        LOG.warn("failed to deploy $MCP_SERVER_SCRIPT into the runtime tree at $target; IDE MCP tools will be unavailable (shared=$shared)")
     }
 
-    /** 从插件资源部署 mcp-ide-server.mjs 到 DSH_HOME（内容变化时覆盖）。 */
-    private fun deployMcpServer(home: Path) {
-        val target = home.resolve("mcp-ide-server.mjs")
-        try {
-            val resource = IdeBridgeResources.mcpServerScript() ?: return
-            if (!Files.exists(target) || Files.readString(target) != resource) {
-                writeUtf8(target, resource)
-                LOG.info("deployed mcp-ide-server.mjs to $target")
-            }
-        } catch (e: Exception) {
-            LOG.warn("failed to deploy mcp-ide-server.mjs", e)
+    /** 写脚本（内容变化才写）；成功返回 true。 */
+    private fun deployScript(resource: String, target: Path): Boolean = try {
+        if (!Files.exists(target) || Files.readString(target) != resource) {
+            writeUtf8(target, resource)
+            LOG.info("deployed $MCP_SERVER_SCRIPT to $target")
         }
+        true
+    } catch (e: Exception) {
+        LOG.warn("failed to deploy $MCP_SERVER_SCRIPT to $target", e)
+        false
     }
 
-    /** MCP server 脚本路径（DSH_HOME 顶层，ESM 可解析顶层 node_modules junction）。 */
-    fun mcpServerScript(projectPath: String): Path = homeDir(projectPath).resolve("mcp-ide-server.mjs")
+    /**
+     * MCP server 脚本路径：`<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/mcp-ide-server.mjs`。
+     * 依赖（`@modelcontextprotocol/sdk` / `zod`）由该位置向上查找 `<运行时根>/dsh/node_modules` 解析。
+     */
+    fun mcpServerScript(): Path =
+        runtimeRoot().resolve("dsh/node_modules/@deepseek-ai").resolve(MCP_BRIDGE_PACKAGE).resolve(MCP_SERVER_SCRIPT)
 
-    /** 将 PasswordSafe 中的 API Key 同步到全局 .credentials.yaml（所有项目共享，由 ide.yml patch 指向）。 */
+    /**
+     * 把 PasswordSafe 中的 API Key **合并写入**共享 `.credentials.yaml`
+     * （所有项目共享，由 `ide.yml` 的 `- id: credentials` patch 指向）。
+     *
+     * 关键：只更新 `refs.DEEPSEEK_API_KEY` 一行，**保留**用户/ dsh 写入的其它 `refs` 键与整个
+     * `records` 段（v0.2.3 及以前用扁平 layout 整份覆盖，会丢掉其它 provider 的密钥与
+     * `client-connection/browser-session` 记录）。dsh 用的是 `version: 1` + `refs`/`records` 文档，
+     * 旧扁平文件在首次写入时内联升级（与 `dsh-credentials-local` 的 `renderFlatLayoutMigration` 等价）。
+     *
+     * @return 是否实际发生变更（供 UI 提示）。
+     */
     fun syncCredentials(): Boolean {
         val key = DshCredentials.readApiKey() ?: return false
-        val credFile = globalConfigHome().resolve(".credentials.yaml")
-        val content = "$DEEPSEEK_API_KEY: $key\n"
+        val credFile = sharedCredentialsPath()
         return try {
-            if (!Files.exists(credFile) || Files.readString(credFile) != content) {
-                writeUtf8(credFile, content)
-                true
-            } else {
-                false
-            }
+            val existing = if (Files.isRegularFile(credFile)) Files.readString(credFile, StandardCharsets.UTF_8) else null
+            if (YamlText.hasRef(existing, DEEPSEEK_API_KEY, key)) return false
+            val updated = YamlText.upsertRef(existing, DEEPSEEK_API_KEY, key)
+            writeOwnerOnly(credFile, updated)
+            true
         } catch (e: Exception) {
-            LOG.warn("failed to sync credentials to DSH_HOME", e)
+            LOG.warn("failed to sync credentials to shared config home", e)
             false
         }
     }
 
-    /** 设置页 apply：把 API Key 同步到全局 .credentials.yaml（运行中的会话需重启生效）。 */
+    /** 设置页 apply：把 API Key 同步到共享凭据文件（运行中的会话需重启生效）。 */
     fun syncCredentialsAll() {
         syncCredentials()
+    }
+
+    /** owner-only 写入（Unix 下 dsh 的 `assertOwnerOnly` 会拒绝组/他人可读的凭据文件）。 */
+    private fun writeOwnerOnly(path: Path, content: String) {
+        Files.createDirectories(path.parent)
+        val tmp = path.resolveSibling(path.fileName.toString() + ".tmp-${System.nanoTime()}")
+        Files.writeString(tmp, content, StandardCharsets.UTF_8)
+        runCatching { setOwnerOnly(tmp) }
+        try {
+            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        } catch (e: Exception) {
+            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING)
+        }
+        runCatching { setOwnerOnly(path) }
+    }
+
+    private fun setOwnerOnly(path: Path) {
+        if (Platform.current().os == Platform.Os.WINDOWS) return // Windows 无 POSIX 权限位（dsh 亦跳过）
+        val posix = Files.getFileAttributeView(path, java.nio.file.attribute.PosixFileAttributeView::class.java)
+        posix?.setPermissions(
+            setOf(
+                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+            )
+        )
     }
 
     private fun writeIfAbsent(path: Path, content: String) {

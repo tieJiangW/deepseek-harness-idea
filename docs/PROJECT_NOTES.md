@@ -2,8 +2,16 @@
 
 > 本文汇总 DeepSeek Harness IDEA 插件开发过程中的**实测环境事实、踩坑记录、dsh 行为结论**，
 > 供后续任务（Step 6 评审及之后的维护/升级）直接参考，避免重复调查。
-> 最后更新：2026-09-15（**dsh 0.1.5-rc.2 升级**，插件版本 **0.2.3**：启动 URL 浏览器鉴权 token（`?token=` → cookie）+
-> RPC 命名空间/信封/参数三处变更（`workspace/list` 已移除）；前端 composer 由 `<textarea>` 改 Lexical contenteditable（注入待适配））
+> 最后更新：2026-09-17（**v0.2.4 配置共享化 + 注入修复**，插件版本 **0.2.4**：
+> ① 删除 `copyGlobalConfigTo`（启动覆盖项目配置 = 新模型/语言丢失根因）；patch 改
+> `- id: settings/credentials/agent-presets/skill-filesystem`（旧的 `$settings` 形态被 dsh 拒绝）；
+> ② MCP 脚本全局唯一、落在 dsh 树内（Node ESM **不越过 junction**），删除每项目 `node_modules` junction；
+> ③ 一次性配置迁移（文本级 namespace / refs+records 合并 + `migrated/` 备份）；
+> ④ **右键"发送选中代码 / 一键解释"没反应修复**：dsh 0.1.5 的 composer 是 Lexical contenteditable，
+> 写入走 `execCommand('insertText')`、回读走 `[data-lexical-text]` + 轮询（真实页面 CDP 实测）；
+> ⑤ `tooling/runtime-dev` 原为 dsh 0.1.1-rc.2，已对齐 0.1.5-rc.2（否则 2 个 workspace 冒烟必失败））
+> 上次更新：2026-09-15（dsh 0.1.5-rc.2 升级，插件版本 0.2.3：启动 URL 浏览器鉴权 token（`?token=` → cookie）+
+> RPC 命名空间/信封/参数三处变更（`workspace/list` 已移除））
 > 上次更新：2026-09-02（**v0.2.1**：运行时供应 UX + 下载可靠性——首次使用下载失败修复、
 > 连接池化 HTTP/2 HttpClient + 浏览器 UA + 超时配置 + 退避重试、工具窗口下载进度条（可取消）、
 > 设置页精确下载 URL 回显/一键复制/可配置超时/本地 zip 离线导入、错误卡失败 URL + 根因 + Restart）
@@ -225,6 +233,187 @@ src/main/resources/
   适配方向：改走 contenteditable（`document.execCommand('insertText')` + Enter 派发），**须在真实 JCEF 页面验证后**再改。
 - 其余未变（实测）：`--profile web` / `--patch` / `--host` / `--port` / `--no-open` 启动参数、端口行前缀 `dsh web: `、
   `lib/bin.js` 入口、profile bundle（`dsh-base` + `dsh-web-app`）、`welcomeNoticeVersion` 常量值 `2026-08-13.1`（与插件常量一致，无需改）。
+
+### v0.2.4 dsh 配置共享化（用户实测驱动的根因修复，全链路实测）
+
+**现象**：在某个项目的 Web「Settings → Models」新增自定义模型（或切换语言），关闭 IDEA 再打开，配置**消失**。
+
+**根因（三重，全部实测）**：
+
+1. **启动覆盖**：v0.1.3-dev ~ v0.2.3 的 `DshHomeManager.ensureHome` 每次启动执行
+   `copyGlobalConfigTo(home)`——把共享根的 `settings.yaml` / `.credentials.yaml`
+   **`REPLACE_EXISTING` 覆盖**到每项目 DSH_HOME。dsh 的配置真源是 `$DSH_HOME`
+   （`dsh-home-paths/lib/index.js:73-76`：显式配置 > `$DSH_HOME` > `~/.dsh`；
+   `dsh-settings-file/lib/index.js:30-40` 默认 `<harness home>/settings.yaml`），
+   而 Web Models 页写的 namespace（`llm-pi-ai` / `llm-deepseek`，
+   `dsh-client-ui-settings-models/lib/client.js:1076`）落在项目子目录 → 下次启动被覆盖清空。
+   同理吃掉 `locale.preference`。
+2. **patch 语法无效**：全局化的实现（`McpPatchGenerator` 的 `$settings` / `$credentials` 分支）
+   用的是 `- $settings:` / `- $credentials:`，dsh **不接受**：
+   ```
+   dsh: [<ide.yml>] patch: id is required for non-insert patches
+   ```
+   整条 patch 被丢弃。**正确写法**是 `- id: settings` / `- id: credentials`（`--dump-config` 实测通过）。
+3. **调用方没传参**：`DshBridgeManager.writePatch()` 调 `McpPatchGenerator.generate(port)`，
+   `globalConfigDir` 走默认空值 → 即使语法正确，分支也不会执行。
+
+**为什么不能用目录链接（junction/symlink）把 `settings.yaml` 指向共享文件**：dsh 写文档走
+`@deepseek-ai/dsh-atomic-write` 的 `writeFileAtomic`（随机名临时文件 + rename 覆盖，`wx` 标志拒绝
+跟随符号链接）。首次写入就会把链接**替换成普通文件**，共享随即失效。→ 只能走配置（`--patch`）重定向。
+
+**dsh patch 语法（0.1.5-rc.2，`--dump-config` 实测）**：`--patch` 是叠加在 bundle 层之上的覆盖层，
+顶层是 `PatchOptions` 数组，两种形态：
+- `insert:` 列表 → 新增条目（新增 mcp-client 必须显式 `name`）；
+- `- id: <rowId>` → **整份替换**该条目的 `config`（未改字段必须重述，不做深合并，
+  见 `dsh-app-boot/README.md:43,60`）。
+校验命令（离线组合，不启动服务、不联网）：
+```powershell
+$env:DSH_HOME="<临时目录>"; node <runtime>\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js `
+  --profile web --patch <ide.yml> --dump-config
+```
+输出里 `# == <ide.yml>` 注释标出该文件贡献的行；无 `patch:` 报错即语法通过。
+
+**全局化范围与各自依据**：
+
+| 行 id | 配置 | 依据 |
+|---|---|---|
+| `settings` | `path: <共享根>/settings.yaml` | `dsh-settings-file` `Config{path,dshHome,watch,debounceMs}`，`path` 优先 |
+| `credentials` | `path: <共享根>/.credentials.yaml` | `dsh-credentials-local` 同构 `Config`（`lib/index.js:58,393-398`） |
+| `agent-presets` | `roots=[<共享根>/.agent-presets]` + `includeUserRoot:false` + `default: standard` | 用户根默认是 `dshHomePath('.agent-presets')`（按项目）；`default` 是 **required**，整份替换必须重述；`copy()`/`remove()` 只认**第一个 user trust 根** |
+| `skill-filesystem` | `dshHome: <共享根>` | 用户技能根 = `<dshHome>/skills`；项目根 `<项目>/.dsh/skills` 不受影响 |
+
+**数据面保持隔离（无回归）**：dsh 全库只有两处 `dshHomePath(...)`——
+`dsh-base/cordis.patch.yml:101` 的 `sessions` 与 `dsh-web-app/cordis.patch.yml:57` 的 `storages`，
+都继续落在每项目 DSH_HOME，因此"切项目后工作区不残留"（v0.1.3-dev 修复）保持成立。
+
+**MCP 脚本零链接（v0.2.4）**：旧实现在每个项目 DSH_HOME 顶层建 `node_modules` junction，
+只为让 `mcp-ide-server.mjs`（当时部署在该目录）能解析 `@modelcontextprotocol/sdk` 与 `zod`。
+现改为把脚本部署到 `<运行时根>/.dsh-ide-bridge/`——该位置向上查找 `node_modules` 会命中
+`<运行时根>/dsh/node_modules/`（dsh 自身依赖树），**无需任何链接**，全局只有一份脚本。
+运行时根不可写时降级为 `<共享根>/.dsh-ide-bridge/` + 那里唯一一个链接。
+
+**junction 体积的实测方法（避免误判）**：`Get-ChildItem -Recurse` **会跟随** junction，把
+被指向的运行时树（约 201.7MB）重复计入每个项目。正确做法是按文件属性判断或排除该目录：
+```powershell
+(Get-Item <项目DSH_HOME>\node_modules -Force) | Select-Object Length, Attributes, Target
+# Length=1, Attributes=Directory, ReparsePoint  → 目录链接本身不占空间
+```
+实测（本机 5 个项目）：排除 junction 跟随后的项目数据仅 0.01 / 0.01 / 0.01 / 0.14 / 1.80 MB。
+
+**磁盘增长的真正来源（后续独立任务）**：每项目 DSH_HOME 下的 `sessions/`（`.jsonl.zstd`）、
+`storages/`、`attachments/v1/objects/<sha256>`（`dsh-attachment-local`，README 明确
+"Objects are retained indefinitely; reference-aware garbage collection is deferred"）。
+这些是数据面，按项目独立、无法共享，需要单独做清理入口。
+
+**迁移（`SharedConfigMigrator`）**：一次性（标记 `<共享根>/.plugin-layout-version` = 插件版本）把各项目
+DSH_HOME 里的 `settings.yaml` / `.credentials.yaml` 与共享文档**文本级合并**（共享侧优先，只补缺：
+缺失的顶层 namespace、缺失的 `refs` 键与 `records` 条目；扁平凭据先内联升级为 `version:1`），原文件
+**移入** `<共享根>/migrated/<hash>/` 备份。失败逐项目降级且**不写标记**（下次启动重试）。
+插件不再参与配置同步：`syncCredentials()` 改为 `YamlText.upsertRef` 合并写入（只替换
+`refs.DEEPSEEK_API_KEY`，保留其它 `refs` 与整个 `records`）——旧实现是扁平整份覆盖，会抹掉
+dsh 自己的 `records.client-connection/browser-session` 与其它 provider 密钥。
+
+### v0.2.4 输入框注入修复（"选中代码右键发送 / 日志一键解释 没反应"，真实页面 CDP 实测）
+
+**现象**：编辑器右键"发送选中代码到 DSH"、运行控制台右键"DSH 一键解释"点击后没有任何可感知反馈。
+
+**根因（真实 dsh 0.1.5 页面实测）**：
+
+1. **输入框不再是 `<textarea>`**。0.1.5 的 composer 是 Lexical：
+   `<div data-lexical-editor="true" role="textbox" contenteditable="true">`。实测 `textarea` 选择器命中 **0**，
+   旧脚本 `document.querySelector('textarea')` 永远找不到元素 → 8s 后超时，什么都不做。
+2. **回读判定读错了地方**。Lexical 把文本放在 `[data-lexical-text="true"]` 节点里；写入**当拍**
+   根元素的 `innerText`/`textContent` 可能为空（异步渲染）。实测：注入其实成功了，但"写后立即回读"
+   得到空串 → 被判成失败 → 降级剪贴板 + 通知。这是"看起来没反应"的直接来源。
+3. **输入框只在进入会话后才渲染**。实测：页面停在内测声明 / "选择工作区"时，`[contenteditable]` 命中 **0**；
+   必须选中工作区（进入会话）后 composer 才存在。若注入发生在页面切换期，必须重试等待。
+
+**验证方法（可复用）**：启动临时 dsh web（真实 0.1.5 运行时）→ 用 Edge headless + CDP
+（`--remote-debugging-port`，Node 原生 `WebSocket` + `Runtime.evaluate`）打开带 `?token=` 的启动 URL →
+页面内 `POST /api/workspace/create`（path 必须是**真实存在**的目录，dsh 会 `realpath` 校验）→ reload →
+点击工作区行进入会话 → 在页面内执行候选注入脚本并回读判定。实测结论：
+
+| 写入方式 | 结果 |
+|---|---|
+| `document.execCommand('insertText', false, text)` | ✅ 生效（且派发 `beforeinput`，Lexical 据此同步内部状态） |
+| 合成 `ClipboardEvent('paste')` | ⚠️ 事件可见，但作为主路径不可靠（仅作兜底） |
+| 合成 `InputEvent('beforeinput')` | ❌ 不触发 Lexical 写入 |
+| 直接改 DOM + `input` 事件 | ❌ Lexical 状态不同步 |
+| 写后**当拍**读 `innerText`/`textContent` | ❌ 读不到（误判失败） |
+| 读 `[data-lexical-text="true"]` + 轮询 200ms | ✅ 立即命中 |
+| 派发 `KeyboardEvent('keydown', key/code/keyCode/which=Enter)` | ✅ 501ms 内提交、输入框清空 |
+
+**修复**：新增 `ComposerScripts`（纯函数、可单测）统一构造注入脚本——选择器顺序
+`textarea` → `[data-lexical-editor="true"]` → `[contenteditable="true"][role="textbox"]` → `div[contenteditable="true"]`；
+contenteditable 用 `execCommand('insertText')` 写入（失败退回合成 `paste`）；回读走 `[data-lexical-text]` 节点
+并轮询 ≤2s；提交用带 `keyCode/which` 的 Enter，再轮询编辑器清空判 `submitted`，否则兜底点发送按钮
+（绝不用 class 通配）；结果经 JBCefJSQuery 回传 `injected` / `submitted` / `blocked` / `notfound` / `failed`，
+失败才降级剪贴板 + 通知（不再"脚本已下发"即乐观提示）。
+
+**教训**：涉及前端 DOM 的注入，**必须在真实页面验证**（CDP 是最省事的办法）；"写成功"不等于"读得到"，
+验证逻辑本身也要实测。
+
+**后续（用户截图报告）：引用重复**。现象 `@…application.yml#L5-15@…application.yml#L5-15`。
+**真实原因（CDP 实测）**：不是"偶尔重复"，而是**每次都追加一份**——`insertText` 前没有任何判重，
+所以每触发一次就多一个引用 chip（用户清空后"不重复"只是因为清空后只剩一份）。
+两个被我最初实现掩盖的细节：
+
+1. **dsh 把 `@路径` 渲染成文件引用 chip**：`<span class="…textRef" data-composer-text-ref=""
+   data-lexical-text="true">`。实测 chip 的 `textContent` 只覆盖路径的一部分（如 `@E:/code/proj/`），
+   文件名与 `#L5-15` 落在相邻的普通文本节点里，且**节点之间不含空白**。
+   → 回读/判重若按"空白分词"或"两侧带空白边界匹配"，就会把**已存在**的引用判成不存在而重复注入。
+   正确做法：**去掉全部空白**再比较（`squash`）。
+2. **空串包含会误判成功**：空编辑器回读为 `''`，`''` 被任何串包含 → 旧实现的"双向包含"判定
+   会把"什么都没写进去"当成成功并返回 `injected`。
+3. **Lexical 空编辑器首次 `insertText` 可能整段不生效**（实测：读回仍为空）→ 必须"轮询确认 +
+   8s 窗口内重试 + 内容长度增长兜底"，不能一次写不进去就报 failed / 就认为已注入。
+
+**修复（三层）**：① 编辑器侧判重（忽略空白比较 + 两边非空 + 写入后轮询/重试）；
+② 面板侧 `SendSelectionRefs` 1200ms 同引用时间窗判重（`sendSelection` 此前**没有在途守卫**，
+`sendQuestion` 有）；③ 引用仍照常进 Bridge 队列。附带把引用构造与判重抽为纯对象 `SendSelectionRefs` 便于单测。
+**验证**：真实 dsh 0.1.5 页面 + CDP，连续注入同一引用 3 次 → 第 1 次 `injected`、第 2/3 次
+`skipped-existing`，**引用 chip 数恒为 1**。
+
+**附：文件引用 chip 是 dsh 原生能力，但对"文件路径"不可用（重要，别再踩）**。
+dsh 的输入框把文本 reference 渲染成 chip，规则在
+`dsh-client-ui-conversation/lib/client.js:12167-12201`：
+
+```js
+const TEXT_REF_RE   = /(^|\s)([/@])([\w-]+)/g;                  // @/ + 单词字符 + 名字命中词表
+const FOLDER_REF_RE = /(^|\s)(@(?:"[^"\n]*\/|[^\s"]+\/))/g;      // 只认"以 / 结尾"的 token
+```
+
+实测（CDP）：`@E:/code/proj/`（目录，结尾 `/`）**会**被渲染成 chip；
+`@E:/code/proj/application.yml#L5-15`（文件 + 行号）**不会**——`FOLDER_REF_RE` 要求结尾是 `/`。
+所以插件注入的"文件 + 行号"引用**在机制上无法 chip 化**；用户看到的"文件名 chip + 行号"来自
+dsh 对**目录**引用的渲染。插件保持注入 `@绝对路径#L起始-结束` 即可：上游将来支持文件 chip 时无需改契约。
+
+**判重实测（用户真实长路径格式，CDP 三次连续注入）**：
+```
+#1 outcome=injected          refs=1   ← 首次写入
+#2 outcome=skipped-existing  refs=1   ← 正确跳过
+#3 outcome=skipped-existing  refs=1   ← 正确跳过
+```
+判据（缺一不可）：① 去掉**全部空白**再比较（chip 的 textContent 只覆盖片段且节点间无空白）；
+② 两边**都非空**（空串包含会把"没写进去"误判成成功）；③ 回读内容**长度量级相近**
+（`got.length >= want.length * 0.8`，防止只读到 `@…/resources/` 这类片段就误判"已存在"而漏写）。
+
+**真正的重复根因（v0.2.4 第二轮实测，用用户短路径复现）**：**"双写"**——`write()` 曾在 `insertText`
+之后用"立即回读是否出现目标文本"来决定**是否再补一次 `paste`**，而
+`document.execCommand('insertText')` 是**同步生效、但 Lexical 异步更新 DOM** 的：回读当拍仍为空
+→ 判定"没写进去" → 又派发 `paste` → **同一份写了两遍**。实测 trace：
+
+```
+first : cmdRet=true → after='@E:/code/cfca/cfcaSDKDemo/pom.xml#L7-11@E:/code/cfca/cfcaSDKDemo/pom.xml#L7-11'
+second: outcome=skipped-existing   ← 第二次点击被正确跳过（说明面板/判重本身没问题）
+```
+
+即"一次点击就出现两份"。**修复：写入路径只保留 `insertText` 一条**，失效一律交给外层
+"轮询 ≤1.2s + 8s 窗口内重试"兜底（绝不能在同一轮里叠加第二种写入机制）。修复后实测：
+`first: injected` → `second: skipped-existing` → **finalText 中引用出现次数 = 1**。
+
+**教训**：对 Lexical 这类"异步渲染的受控编辑器"，**不能在写入后立即回读做补救决策**；
+"写入路径唯一 + 异步重试"才是安全形态。
 
 ### FileChooser 隐藏 .zip（v0.2.3 实测：设置页"Choose local runtime zip…"看不到文件）
 

@@ -24,8 +24,12 @@ object DshCredentials {
     fun writeApiKey(key: String) = passwordSafe().setPassword(ATTRIBUTES, key)
 
     /**
-     * 从 `DEEPSEEK_API_KEY: <key>` 形式的 credentials YAML 中解析 Key（行级解析，与
+     * 从 `DEEPSEEK_API_KEY: <key>` 形式的凭据 YAML 中解析 Key（行级解析，与
      * [com.deepseek.harness.idea.settings.CredentialImporter] 一致；独立实现避免循环依赖）。
+     *
+     * 注意：这是**宽松**解析（匹配任意缩进层级的该键）。dsh 的 `version: 1` 文档把真正的 key 放在
+     * `refs:` 段下，读取共享凭据文件请优先用 [readApiKeyFromSharedDocument]（按段定位，避免误命中
+     * `records` 等段内的同名键）。
      * @return 找到的 Key；文件缺失/无该键时返回 null。
      */
     fun readApiKeyFromCredentialFile(file: Path): String? {
@@ -41,10 +45,44 @@ object DshCredentials {
     }
 
     /**
+     * 从 dsh 的 `version: 1` 凭据文档中读取 `refs.DEEPSEEK_API_KEY`（按段定位）。
+     *
+     * 兼容两种形态：
+     * - `version: 1` + `refs:` 段（dsh 0.1.5 的正式 layout）；
+     * - pre-release 扁平 layout（顶层直接 `DEEPSEEK_API_KEY: <key>`）。
+     *
+     * @return 找到的 Key；文件缺失/无该键时返回 null。
+     */
+    fun readApiKeyFromSharedDocument(file: Path): String? {
+        if (!Files.isReadable(file)) return null
+        val lines = Files.readAllLines(file)
+        var inRefs = false
+        for (raw in lines) {
+            val line = raw.trimEnd()
+            if (line.isEmpty() || line.trimStart().startsWith("#")) continue
+            val indented = line.first() == ' ' || line.first() == '\t'
+            if (!indented) {
+                inRefs = line.trim() == "refs:"
+                // 扁平 layout：顶层直接就是键
+                if (!inRefs && line.trim().startsWith("$DEEPSEEK_API_KEY:")) {
+                    return line.substringAfter(':').trim().trim('"', '\'')
+                }
+                continue
+            }
+            if (!inRefs) continue
+            val t = line.trim()
+            if (t.startsWith("$DEEPSEEK_API_KEY:")) {
+                return t.substringAfter(':').trim().trim('"', '\'')
+            }
+        }
+        return null
+    }
+
+    /**
      * 统一读取当前 Key：**先 PasswordSafe，无则回退到 [credentialFile]（插件 DSH_HOME 的
      * `.credentials.yaml`）**。用于设置页脱敏回显等纯读场景——PasswordSafe 读不到（如 IDE 密码库
      * 未解锁）时仍能反显已在 `.credentials.yaml` 中的 Key。
-     * @param credentialFile - 兜底凭据文件（如 [DshHomeManager.globalConfigHome]/.credentials.yaml）。
+     * @param credentialFile - 兜底凭据文件（如 [DshHomeManager.sharedCredentialsPath]）。
      */
     fun readApiKeyWithFallback(credentialFile: Path?): String? =
         readApiKey() ?: credentialFile?.let { readApiKeyFromCredentialFile(it) }

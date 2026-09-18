@@ -10,7 +10,7 @@ import java.nio.file.StandardCopyOption
 /**
  * 旧版（v0.1.2，全局 DSH_HOME）→ 新版（v0.1.3-dev 起，每项目隔离 DSH_HOME）升级迁移。
  *
- * 旧版 dsh 的 DSH_HOME 就是全局根 `<config>/dsh-idea/dsh-home`（即 [DshHomeManager.globalConfigHome]），
+ * 旧版 dsh 的 DSH_HOME 就是全局根 `<config>/dsh-idea/dsh-home`（即 [DshHomeManager.sharedConfigRoot]），
  * session 数据位于其 `sessions/<projectKey(cwd)>/<sessionId>/`；新版 DSH_HOME 改为
  * `dsh-home/<md5(projectPath)>`，dsh 只读该子目录。升级后旧 session 目录仍在全局根，但已不被读取，
  * 用户表现为"升级后之前的 session 找不到了"。

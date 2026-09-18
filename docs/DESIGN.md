@@ -68,12 +68,13 @@
    （**dsh 0.1.5 起为 `http://127.0.0.1:<port>/?token=<t>`**，浏览器鉴权 token）。插件逐行读取 stdout，
    用 `PortParser.parsePort` 取端口、`PortParser.parseUrl` 取**完整启动 URL（含 token）**，随后健康检查（见 §3.4）。
 2. **信任围栏**：`/api` 请求的浏览器信任围栏接受 loopback hostname（`dsh-client-connection` `isLoopbackHostname`），故 JCEF 从 `http://127.0.0.1:<webPort>` 加载可正常调用 API；无需 `--trusted-host`。`--host 0.0.0.0` 被 dsh 主动拒绝，天然防外网暴露。
-3. **凭据**：插件在 DSH_HOME 下以 `DEEPSEEK_API_KEY` 为键管理密钥（key 真源 = PasswordSafe + 插件自己管理的
-   全局凭据文件）。设置页写入 PasswordSafe + 全局文件；**不向 dsh 进程注入 `DEEPSEEK_API_KEY` 环境变量**
+3. **凭据**：以 `DEEPSEEK_API_KEY` 为键管理密钥（真源 = PasswordSafe + **共享**凭据文件
+   `<共享根>/.credentials.yaml`，v0.2.4 起 dsh 与插件写同一份文件）。设置页写入 PasswordSafe +
+   合并写入共享文件；**不向 dsh 进程注入 `DEEPSEEK_API_KEY` 环境变量**
    （`dsh-credentials-local.resolve()` 为 `inherited env wins`，注入会遮蔽 Web UI 写入并使 `assertUnshadowed`
    拒绝 Web UI 的 set；见 §3.9 与 PROJECT_NOTES §4）。
-4. **Profile 合成**：`profiles/<name>/cordis.yml` 初始为 `[]`，由 bundle 层（`package.json` 的 `dsh.profile.bundles`）+ `cordis.patch.yml` 用户层 + `--patch` 覆盖层合成。插件以 `--patch <ide.yml>` 注入 mcp-client，不污染用户层。
-5. **MCP 客户端**：`@deepseek-ai/dsh-mcp-client` 支持 `transport: streamable-http`；每实例一个 serverName；模型侧工具名为 `mcp__<serverName>__<rawName>`（serverName 须匹配 `^[A-Za-z0-9_-]{1,32}$`）。其依赖 `@modelcontextprotocol/sdk` 存在于 profile 的 hoisted `node_modules`，可被插件附带的 MCP server 脚本 import（脚本置于 DSH_HOME 下按 node 向上查找规则解析）。
+4. **Profile 合成**：`profiles/<name>/cordis.yml` 初始为 `[]`，由 bundle 层（`package.json` 的 `dsh.profile.bundles`）+ `cordis.patch.yml` 用户层 + `--patch` 覆盖层合成。插件以 `--patch <ide.yml>` 注入 mcp-client（`insert:`）与四个共享化行（`- id: <rowId>` 整份覆盖，见 §4.5），不污染用户层。
+5. **MCP 客户端**：`@deepseek-ai/dsh-mcp-client` 支持 `transport: streamable-http`；每实例一个 serverName；模型侧工具名为 `mcp__<serverName>__<rawName>`（serverName 须匹配 `^[A-Za-z0-9_-]{1,32}$`）。其依赖 `@modelcontextprotocol/sdk` 存在于 dsh 安装树的 `node_modules`，由插件附带的 MCP server 脚本按 node 向上查找解析——脚本部署在 `<运行时根>/.dsh-ide-bridge/`，因此**无需任何 junction**（v0.2.4）。
 6. **运行时（v0.2.0+ thin 默认）**：固定 `@deepseek-ai/dsh@0.1.5-rc.2` + Node.js 22.x；插件**不打包**约 93MB 的运行时，Windows/macOS/Linux 一律在**首次使用按平台下载**（`runtime-assets.json` 资产地图 → `runtime-<os>-<arch>.zip` + `.sha256`），SHA-256 校验后解压缓存到 `<config>/dsh-idea/runtime/<ver>/`（离线/升级复用；`DSH_IDEA_RUNTIME` 或设置页 runtime-directory 跳过下载；fat 构建 `-Pthin=false` 才内置、免下载）。v0.2.1 起下载走池化 HTTP/2 的 `java.net.http.HttpClient` + 浏览器 UA + 超时/退避重试，带进度/取消（见 §3.2）。
 
 ## 3. 模块设计
@@ -143,11 +144,14 @@
 - **平台资产注意（v0.2.1）**：`macos-x64`（Intel Mac）运行时**无法在 GitHub-hosted runner 构建**（Intel macOS
   已退役）→ `runtime-macos-x64.zip` 未随 release 发布，Intel Mac 的下载路径将 404，需在其它主机另行构建并发布；
   macOS arm64 不受影响（Intel Mac 用户可先用 `DSH_IDEA_RUNTIME` / 本地 zip 离线导入）。
-- DSH_HOME：`PathManager.getConfigDir()/dsh-idea/dsh-home/`（与运行时分离，不随版本变化）。
-  插件幂等生成 `profiles/web/`（package.json + cordis.yml）与 `ide.yml`；dsh 首次启动时
-  自愈创建 `profiles/node_modules` junction 指向运行时 dsh 树（实测验证）。
-- 生成运行期文件：全局凭据文件（从设置页，PasswordSafe 镜像）、`ide.yml`（patch，含 mcp-client 配置与 bridge 地址/token）。
-- 初始化顺序：校验/下载运行时（首次必要时下载+解压；v0.2.1 工具窗口进度条/可取消）→ 生成 DSH_HOME → 写凭据 → 写 patch → 启动进程 → 健康检查。
+- 目录布局（v0.2.4，详见 §4.4）：**共享配置根** `<config>/dsh-idea/dsh-home/`（dsh 用户级配置面唯一真源）
+  + **每项目 DSH_HOME** `<共享配置根>/<md5(项目根)前16位>/`（只放 `sessions`/`storages`/`profiles`/`ide.yml`）。
+  插件幂等生成每项目的 `profiles/web/`（package.json + cordis.yml）与 `ide.yml`；dsh 首次启动时
+  自愈创建 `profiles/node_modules` junction 指向运行时 dsh 树（实测验证，这是 dsh 自己维护的、与插件无关）。
+- 生成运行期文件：共享凭据文件（PasswordSafe 合并镜像）、共享 `settings.yaml` 占位（内测声明 acknowledge）、
+  `ide.yml`（patch：mcp-client + settings/credentials/agent-presets/skill-filesystem 四段指向共享根）。
+- 初始化顺序：校验/下载运行时（首次必要时下载+解压；v0.2.1 工具窗口进度条/可取消）→ 部署全局 MCP 脚本
+  → 一次性共享配置迁移与遗留清理 → 生成每项目 DSH_HOME 骨架 → 合并写入共享凭据 → 写 patch → 启动进程 → 健康检查。
 
 ### 3.3 DshProcessManager
 
@@ -229,7 +233,10 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 
 **MCP Server（`mcp-ide-server.mjs`）**：
 
-- 复用 profile hoisted `node_modules` 的 `@modelcontextprotocol/sdk`（脚本置于 `$DSH_HOME` 下，node 向上查找命中 `profiles/node_modules`；若构建期已验证失败，则改为将 sdk 一并打包进脚本目录）。
+- **全局唯一一份**，部署在 `<运行时根>/.dsh-ide-bridge/mcp-ide-server.mjs`（v0.2.4）：脚本在该目录下
+  `import '@modelcontextprotocol/sdk/...'` / `'zod/v4'` 时，Node 的 ESM 解析会向上命中
+  `<运行时根>/dsh/node_modules/`（dsh 自身安装树），因此**不需要任何 `node_modules` 链接**。
+  运行时根不可写时降级为 `<共享根>/.dsh-ide-bridge/` + 那里唯一一个链接。
 - 用 SDK `StreamableHTTPServerTransport` 起 `127.0.0.1:<mcpPort>`；mcpPort 随机（`--port 0` 或 HttpServer 自选）。
 - 注册工具（raw name → 参数 → 调 IDE Bridge，带 token）：
   - `ide_get_selection` → `GET /selection`
@@ -260,7 +267,8 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 ```
 
 - 模型侧工具名：`mcp__ide__ide_get_selection` 等（raw name 前缀 `mcp__<serverName>__`）。
-- MCP server（`mcp-ide-server.mjs`）部署在 DSH_HOME 顶层；插件在 DSH_HOME 顶层创建 `node_modules` junction → runtime dsh 树，使 ESM 能向上解析 `@modelcontextprotocol/sdk`（dsh 自愈的 `profiles/node_modules` 不在 ESM 向上查找路径上，实测必需）。
+- MCP server（`mcp-ide-server.mjs`）**全局部署一份**于 `<运行时根>/.dsh-ide-bridge/`，依赖由
+  `<运行时根>/dsh/node_modules` 天然向上解析（v0.2.4 起不再建任何 junction，见 §3.6/§4.4）。
 - `failOnStartupError: true`（测试/诊断形态）：MCP 连接或工具同步失败即拒绝启动，用于冒烟验证。
 
 ### 3.7 代码上下文发送
@@ -268,14 +276,80 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 - 编辑器右键动作"发送选中代码到 DSH"（`SendSelectionAction`，注册于 `EditorPopupMenu`，见 plugin.xml `<actions>`）：
   1. `ReadAction` 读选中文本/文件/语言（≤64KB，超出截断并注明 `…(已截断)`）；
   2. **直接写入 Bridge 的 sent-selection 队列**（`SentSelectionQueue`：容量 ≤10 条、单条 ≤64KB，环形淘汰）——智能体可随时经 `ide_get_sent_selection` 取回，**必达**；
-  3. 聚焦工具窗口 + JCEF 注入预填 composer：轮询等待 dsh web 的 `<textarea>`（**0.1.1 实测**为 React 受控组件），
-     原生 setter 设置 value + 派发 `input` 事件（触发 React onChange）。
-     **⚠️ dsh 0.1.5 起 composer 已改为 Lexical contenteditable**（`data-lexical-editor="true"`），
-     该注入当前**必然失败** → 走第 4 步剪贴板降级（有通知）；适配需改写为 contenteditable 路径并在真实 JCEF 页面验证；
-  4. 注入失败/未运行 → 系统剪贴板 + 通知"请粘贴到输入框（代码已就绪）"。
+  3. 聚焦工具窗口 + 经 `ComposerScripts.build(...)` 注入预填 composer（**v0.2.4 起兼容 dsh 0.1.5 的 Lexical
+     contenteditable**，见 §3.7.1），结果经 JBCefJSQuery 回传 `injected` / `notfound` / `failed`；
+  4. 注入失败（未运行/找不到输入框/写入未生效）→ 系统剪贴板 + 通知"请粘贴到输入框（代码已就绪）"。
+
+#### 3.7.1 composer 注入（v0.2.4 修复，真实页面 CDP 实测）
+
+dsh 0.1.5 的输入框是 **Lexical `contenteditable`**：
+`<div data-lexical-editor="true" role="textbox" contenteditable="true">`。旧的
+`document.querySelector('textarea')` 命中 0，两个动作（发送选中代码、一键解释）因此"没反应"。
+
+`ComposerScripts`（纯函数，`ComposerScriptsTest` 锁定契约）实现：
+
+| 环节 | 做法 | 实测结论 |
+|---|---|---|
+| 定位 | `textarea` → `[data-lexical-editor="true"]` → `[contenteditable="true"][role="textbox"]` → `div[contenteditable="true"]`，8s 内每 300ms 重试 | 输入框**只在进入会话后**才渲染；页面停在"选择工作区"时命中 0 |
+| 写入 | contenteditable 用 `document.execCommand('insertText')`（派发 `beforeinput`，Lexical 据此同步内部状态）；`textarea` 用原生 setter + `input` 事件；前者失败退回合成 `paste` | insertText ✅；合成 `beforeinput` ❌；纯改 DOM ❌ |
+| 回读验证 | 读 `[data-lexical-text="true"]` 节点文本，**轮询 ≤2s** | 写入**当拍**根元素 `innerText`/`textContent` 可能为空 → 立即回读会误判失败 |
+| 自动提交 | 派发 `KeyboardEvent('keydown', {key/code/keyCode/which: Enter})`，轮询编辑器清空判 `submitted`；否则点 `button[aria-label="Send message"/"发送消息"]`（绝不用 class 通配） | Enter 路径 501ms 内提交成功 |
+
+结果语义：`injected`（已填入）/ `submitted` / `blocked`（已填入但需手动回车）/ `notfound` / `failed`；
+仅后两者降级剪贴板 + 通知（不再"脚本已下发"即乐观提示）。
+
+#### 3.7.2 重复引用防护（v0.2.4，用户截图实测）
+
+dsh 的输入框是**累积**内容：注入是"追加"而非"替换"。右键菜单双击（或快捷键连按）会让同一条引用
+被追加两遍——实测现象 `@…application.yml#L5-15@…application.yml#L5-15`。四层防护：
+
+1. **编辑器侧（主）**：`ComposerScripts` 写入前先判断输入框**是否已包含**同一引用，已包含则直接
+   `injected` 返回、不再写入。判定要点（均为真实页面实测得出）：
+   - 判重必须**忽略全部空白**再比较：dsh 会把 `@路径` 渲染成引用 chip
+     （`<span data-composer-text-ref data-lexical-text="true">`），chip 的 `textContent` 与相邻文本节点
+     之间**不带空白**，按"空白分词 / 带边界匹配"会判成"不存在"从而重复注入；
+   - 判重必须要求**两边都非空**：空编辑器回读为空串，`""` 被任何串包含 → 会把"什么都没写进去"
+     误判为成功；
+   - 回读内容**长度量级相近**：防止只读到 `@…/resources/` 这类片段就误判"已存在"而漏写。
+2. **写入路径唯一（关键）**：只走 `document.execCommand('insertText')` **一条路径**。
+   ⚠️ 反面教训：曾在其后按"立即回读是否出现目标文本"决定**是否再补一次 `paste`**，而 `insertText`
+   是**同步生效、Lexical 异步更新 DOM** 的——回读当拍为空 → 判定"没写进去" → 又派发 `paste`
+   → **同一份写了两遍**（用户看到 `@a#L7-11@a#L7-11`，且表现为"一次点击就出现两份"）。
+3. **写入重试**：Lexical **空编辑器上首次 `insertText` 可能整段不生效**（实测：读回仍为空），因此
+   写入后"轮询 ≤1.2s 确认 + 8s 窗口内重试"，并额外用"内容长度是否增长"兜底判定。
+4. **面板侧**（`SendSelectionRefs`）：同一引用在 `SendSelectionRefs.DEDUPE_WINDOW_MS`（1200ms）内
+   再次到达即跳过注入；引用本身仍写入 Bridge 的 sent-selection 队列（智能体侧不丢上下文）。
+
+> 实测验证（真实 dsh 0.1.5 页面 + headless Chromium/CDP，用户短路径
+> `@E:/code/cfca/cfcaSDKDemo/pom.xml#L7-11`）：
+> - 修复前（双写）：**一次点击即出现两份**；
+> - 修复后：`first: injected` → `second: skipped-existing` → **finalText 中引用出现次数 = 1**。
+
+#### 3.7.3 关于"文件引用 chip"（dsh 原生能力，当前**无法**用于文件路径）
+
+dsh 0.1.5 的输入框会把 **文本形态** 的引用渲染成 chip，规则见
+`dsh-client-ui-conversation/lib/client.js:12167-12201`：
+
+```js
+const TEXT_REF_RE   = /(^|\s)([/@])([\w-]+)/g;                    // @/ + 单词字符，且名字必须在触发词的词表里
+const FOLDER_REF_RE = /(^|\s)(@(?:"[^"\n]*\/|[^\s"]+\/))/g;        // 只认"以 / 结尾"的 token（@dir/ 目录引用）
+```
+
+实测（真实 dsh 0.1.5 页面 + CDP）：
+
+| 注入文本 | 是否渲染 chip |
+|---|---|
+| `@E:/code/proj/`（目录，以 `/` 结尾） | ✅ 渲染 |
+| `@E:/code/proj/application.yml#L5-15`（文件 + 行号） | ❌ 不渲染（`FOLDER_REF_RE` 要求结尾是 `/`） |
+| `@name`（配合前端词表命中） | 视词表而定，插件无法为此注入词表条目 |
+
+**结论**：插件注入的"文件 + 行号"引用**在机制上无法变成 chip**，只能保持 `@绝对路径#L起始-结束` 的
+紧凑文本形态（用户看到的"文件名 chip + 行号"来自 dsh 自身 UI 对**目录**引用的渲染，不是文件引用）。
+如果上游 dsh 将来支持文件引用 chip，插件只需继续注入同一文本即可自动受益（无需改契约）。
+
 - **紧凑文件引用**（v0.5.4，用户反馈迭代）：注入内容仅 `@绝对路径#L起始-结束` + 尾随换行
-  （`buildCompactReference`），**无提示语、无代码本体**；注入后光标 `setSelectionRange` 移到
-  文本末尾（引用行下一行），可直接输入问题。完整选中代码仍写入 Bridge sent-selection 队列
+  （`SendSelectionRefs.compactReference`），**无提示语、无代码本体**；注入后光标停在末尾，
+  可直接输入问题。完整选中代码仍写入 Bridge sent-selection 队列
   （智能体可经 `ide_get_sent_selection` 取回，或经 fs 工具读文件对应行）。实测确认：dsh 输入
   触发菜单仅注册了 `/` 源，`@` 前缀（`roster.length===0`）不会弹菜单，可安全作为引用前缀。
 - **技术边界（实测 dsh 0.1.1-rc.2）**：dsh 输入框**不支持**输入态"文件引用 chip（文件名+行号+X 删除）"——
@@ -296,24 +370,29 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 ### 3.9 设置页
 
 - `DshSettingsState`（`PersistentStateComponent`，application 级，跨项目共享）：
-  - `model`（`deepseek-chat` 默认 / `deepseek-reasoner`）
-  - `baseUrl`（默认 `https://api.deepseek.com`，可空）
-  - `dshHomeOverride`（高级，默认 null → 用 `PathManager.getConfigDir()/dsh-idea/dsh-home`）
+  - `model`（`deepseek-chat` 默认 / `deepseek-reasoner`）与 `baseUrl`（默认 `https://api.deepseek.com`）：
+    **插件侧记录项**，当前不写入 dsh 配置；模型/供应商的真实配置在 DSH Web UI「Settings → Models」
+    （写入共享 `settings.yaml` 的 `llm-pi-ai` / `llm-deepseek` 段）。设置页文案已注明，避免 UI 撒谎。
+  - `dshHomeOverride`（高级，默认 null → 用 `PathManager.getConfigDir()/dsh-idea/dsh-home`，即
+    `DshHomeManager.sharedConfigRoot()`；字段保留以兼容既有 XML，目前未接线到 UI）
   - `logLevel`
   - 运行时相关（v0.2.0+，行为见 §3.2）：runtime-directory（指向本地已解压运行时，配置后跳过下载，等价 `DSH_IDEA_RUNTIME`）；运行时下载 URL（v0.2.1 起设置页回显当前平台**精确到文件的 URL** + 一键复制）与下载超时（可配置）；「选择本地运行时 zip…」离线导入（校验 zip 与 `.sha256` 侧车）。
+  - **共享配置目录（v0.2.4）**：只读展示 `DshHomeManager.sharedConfigRoot()` +「打开」按钮，便于用户
+    直接查看/编辑 dsh 的共享配置（dsh 对 `settings.yaml` 有热重载，外部编辑会即时生效）。
 - **API Key（`DshCredentials`，PasswordSafe 应用级）**：
   - 读写 `PasswordSafe`（应用级凭据条目）。
   - **脱敏回显**（用户要求"前 6 位 + 中间脱敏 + 后 6 位"）：`DshCredentials.maskApiKey(key)` 前 6 位 + `******` + 后
     6 位（≤12 位整段脱敏）；设置页用 `JBTextField` 回显脱敏串（不能用 `JBPasswordField`，其把文本渲染成掩码点，
     看不到脱敏串）；`isModified`/`apply` 以"字段内容 ≠ 当前脱敏串"判定用户是否真的改了 key，避免把脱敏串写回密码库。
-  - **回显兜底**：`readApiKey() ?: readApiKeyFromCredentialFile(插件全局凭据文件)`——PasswordSafe 读不到
-    （如 IDE 密码库未解锁）时回退到插件自管的全局凭据文件（方案A真源）。
-- 应用行为：写 PasswordSafe + 同步插件全局凭据文件（`syncCredentialsAll` → `syncCredentials`）；
-  **不再向 dsh 进程注入 `DEEPSEEK_API_KEY` 环境变量**（见 §2.3/§3.9 说明）；提示"重启会话生效"；"重启 dsh"按钮。
-- **Web UI 改 key 全局生效（`DshCredentialsSync`，方案B）**：dsh Web UI（Models page）改 key 写当前项目
-  DSH_HOME 下凭据文件（version:1 + refs）；`DshCredentialsSync` 用 `WatchService` 监听该文件，
-  与全局不一致时回写 PasswordSafe + 插件全局凭据文件——改 key 的那个 dsh 进程立即生效，其它项目
-  **下次启动/重启**时 `syncCredentials()`/`ensureHome()` 从全局复制 + 透传，全局一致。
+  - **回显兜底**：`readApiKey() ?: readApiKeyFromSharedDocument(共享凭据文件)`——PasswordSafe 读不到
+    （如 IDE 密码库未解锁）时回退到共享 `.credentials.yaml`（按 `refs:` 段定位，避免误命中 `records` 内的同名键）。
+- 应用行为：写 PasswordSafe + **合并写入**共享凭据文件（`syncCredentialsAll` → `syncCredentials` →
+  `YamlText.upsertRef`，只替换 `refs.DEEPSEEK_API_KEY`，保留其它 `refs` 与整个 `records`）；
+  **不向 dsh 进程注入 `DEEPSEEK_API_KEY` 环境变量**（见 §2.3）；提示"重启会话生效"；"重启 dsh"按钮。
+- **Web UI 改 key 无需同步（v0.2.4）**：dsh 与插件读写**同一份**共享凭据文件
+  （`ide.yml` 的 `- id: credentials` patch 指向共享根），Web UI 的改动立即对插件可见，反之亦然。
+  旧实现（`DshCredentialsSync` + WatchService 跨目录回写）已废弃：其扁平 layout 整份覆盖会抹掉
+  `records` 与其它 provider 的 `refs`。该类保留为空操作以免破坏外部调用点，文档见 §4.4。
 - `CredentialImporter`：读用户本机 source 凭据文件的 `DEEPSEEK_API_KEY`（解析仅取该键），不存在/无键 → 提示。
 
 ### 3.10 国际化
@@ -334,19 +413,17 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 - `DshToolWindowPanel.sendQuestion`（自动提交，**不等待用户确认**）：
   1. 在途守卫（`AtomicBoolean` 防双击）+ token 化回调（`AtomicLong` 防旧回调串台）；
   2. 激活工具窗口并 `setSelectedContent(content 0)` 切到对话页（避免停在日志 tab）；
-  3. JCEF 注入脚本：原生 setter 填 composer → `input` 事件 → 派发 `keydown Enter`
-     （dsh composer 实测：非 shift 的 Enter → `keyboard.submit`，智能体忙时默认入队仍送达）→
-     轮询 ≤3s 判 textarea 清空 = `submitted`；未清空则回退点击
+  3. JCEF 注入（`ComposerScripts.build(text, submit = true, ...)`，见 §3.7.1）：写入 composer →
+     派发 `keydown Enter`（带 `keyCode/which`；dsh composer 实测：非 shift 的 Enter → `keyboard.submit`，
+     智能体忙时默认入队仍送达）→ 轮询编辑器清空 = `submitted`；未清空则回退点击
      `button[aria-label="Send message"/"发送消息"]`（**不用 class 通配**，避免误点运行中的"停止"按钮）；
-  4. 结果经 **JBCefJSQuery** 回传 `submitted / blocked / no-composer`：`submitted` → 通知已发送；
-     `blocked` → 消息留在输入框 + 提示手动回车；其他 → 剪贴板兜底 + 失败通知；
+  4. 结果经 **JBCefJSQuery** 回传 `submitted / blocked / notfound / failed`：`submitted` → 通知已发送；
+     `blocked` → 消息留在输入框 + 提示手动回车；`notfound`/`failed` → 剪贴板兜底 + 通知；
      `setupJsQuery` 必须在 `loadURL` **之前**创建（CEF message router 在页面加载时注入
      `window.<funcName>`；创建失败降级为无验证乐观提示）。
-- 技术边界：**0.1.1 实测** composer 文本区即页面 `<textarea>`（`document.querySelector('textarea')`）；
-  发送按钮 aria-label 为 "Send message" / "发送消息"（`t("input.send")`）。
-  **⚠️ 0.1.5 起 composer 改为 Lexical contenteditable**（`data-lexical-editor="true"`；0.1.1 的 `jsx("textarea")` 已不存在）→
-  现有注入失效、按设计降级剪贴板；适配需改用 contenteditable 路径（`document.execCommand('insertText')` + Enter 派发）
-  并**在真实 JCEF 页面验证**（当前最高优先项）。
+- 技术边界：发送按钮 aria-label 为 "Send message" / "发送消息"（`t("input.send")`）。
+  **0.1.5 起 composer 为 Lexical contenteditable**——v0.2.4 已完成适配并**在真实页面（CDP）验证**，
+  见 §3.7.1（历史状态：0.1.1 为 React 受控 `<textarea>`，用原生 setter + `input` 事件）。
 
 ## 4. 接口契约
 
@@ -395,44 +472,61 @@ stdout   = 逐行读取；含 "dsh web: http://127.0.0.1:<webPort>"
 > 放在后面会被 web 应用当作未知选项拒绝（实测 dsh 0.1.1-rc.2）。
 > `--no-open`：dsh web 默认会把 Web UI 打开到系统默认浏览器；内嵌于 IDE 工具窗，显式禁用（用户要求，v0.1.3-dev）。
 
-### 4.4 运行时与 DSH_HOME 目录布局（插件独立）
+### 4.4 运行时与目录布局（共享配置根 + 每项目 DSH_HOME，v0.2.4）
 
 ```
 <PathManager.getConfigDir()>/dsh-idea/
-├── runtime/<version>/            # 运行时（v0.2.0+ thin：首次按平台下载+SHA-256 校验；DSH_IDEA_RUNTIME / 设置页 runtime-directory 覆盖；全局共享，不按项目）
-│   ├── node/                     # Node.js 运行时（按平台：node.exe / node，归一化布局）
-│   └── dsh/                      # npm 安装的 @deepseek-ai/dsh 树（含全部依赖）
-├── dsh-home/                     # DSH_HOME 根（v0.1.3-dev：全局配置 + 每项目隔离数据）
-│   ├── 凭据文件                   #   全局凭据真源（PasswordSafe 镜像；方案A）
-│   ├── settings.yaml             #   全局设置（内测声明 acknowledge；同步到各子目录）
-│   └── <md5(项目根目录)前16位>/   # 每个项目一个独立 DSH_HOME——工作区注册表/会话数据按项目隔离，
-│       ├── 凭据文件               #   切换项目后 dsh 工作区从当前项目"白纸"开始（彻底解决工作区残留）
-│       ├── settings.yaml         #   启动时从全局复制（内测声明等；dsh 读子目录副本）
-│       ├── ide.yml               #   运行期生成的 patch（mcp-client，McpPatchGenerator）
-│       ├── mcp-ide-server.mjs    #   MCP server 脚本（插件资源部署）
-│       ├── node_modules/         #   顶层 junction → runtime/dsh/node_modules（MCP 脚本 ESM 解析 SDK）
-│       ├── profiles/web/         #   物化的 web profile（package.json + cordis.yml）
-│       ├── profiles/node_modules/#   dsh 首次启动自愈创建的 junction → runtime/dsh/node_modules
-│       └── sessions/ storages/   #   会话数据 + 工作区/投影缓存（dsh 自动创建；每个项目独立）
+├── runtime/<version>/                     # 运行时（v0.2.0+ thin：首次按平台下载+SHA-256 校验；全局共享，不按项目）
+│   ├── node/                              # Node.js 运行时（按平台：node.exe / node，归一化布局）
+│   ├── dsh/                               # npm 安装的 @deepseek-ai/dsh 树（含全部依赖）
+│   ├── dsh/node_modules/                  #   MCP 脚本依赖的解析落点
+│   └── .dsh-ide-bridge/mcp-ide-server.mjs #   ★ MCP server 脚本（全局唯一一份；v0.2.4）
+└── dsh-home/                              # ★ 共享配置根（所有项目共享；v0.2.4 起 = DshHomeManager.sharedConfigRoot()）
+    ├── settings.yaml                      #   dsh 设置文档唯一真源（模型 provider/自定义模型、语言、内测声明）
+    ├── .credentials.yaml                  #   dsh 凭据唯一真源（version:1 + refs/records）
+    ├── .agent-presets/                    #   Agent 预设（用户可作者化根）
+    ├── skills/                            #   个人技能（项目技能仍在 <项目>/.dsh/skills）
+    ├── .plugin-layout-version             #   插件写入：一次性布局迁移完成标记
+    ├── migrated/<md5(项目路径)前16位>/     #   迁移备份（旧的项目级 settings.yaml / .credentials.yaml）
+    ├── sessions/ storages/ profiles/      #   仅历史残留（v0.1.2 全局 DSH_HOME；sessions 由迁移器读取）
+    └── <md5(项目根目录)前16位>/            # ★ 每项目 DSH_HOME（**只承载数据面**）
+        ├── ide.yml                        #   patch（每项目；含动态 mcpPort）
+        ├── profiles/web/                  #   物化 web profile（package.json + cordis.yml）
+        ├── profiles/node_modules/         #   dsh 首次启动自愈创建的 junction → runtime/dsh/node_modules
+        ├── sessions/ storages/            #   会话 + 工作区注册表 + 投影缓存（dsh 自动创建；每项目独立）
+        └── attachments/                   #   图片附件对象存储（<DSH_HOME>/attachments/v1/objects/<sha256>）
 ```
 
-> **全局配置根（`DshHomeManager.globalConfigHome()`，= `dsh-home/`）**：插件自管的全局凭据文件与
-> `settings.yaml` 的**唯一真源**，所有项目共享；`ensureHome` 启动时用 `copyGlobalConfigTo` 把它们
-> **复制到每项目子目录**（dsh 读子目录副本；dsh 内改动下次启动被全局覆盖——方案A的 tradeoff）。API Key 经
-> `DshCredentialsSync`（WatchService）在 dsh Web UI 改 key 时回写全局 PasswordSafe + 插件全局凭据文件
-> （见 §3.9），使所有子项目下次启动/重启时一致（方案B）。
+> **为什么这样切分（v0.2.4，用户实测驱动）**：dsh 的**用户级配置面**天然只有一份（Web「Settings → Models」
+> 写的 `llm-pi-ai` / `llm-deepseek` 段、语言 `locale`、API Key、Agent 预设、个人技能），而**数据面**
+> （`sessions` / `storages` / 附件）必须按项目隔离才能保证"切项目后工作区不残留"（v0.1.3-dev 修复）。
+> 因此：配置面经 `ide.yml` 的 `- id: settings` / `- id: credentials` / `- id: agent-presets` /
+> `- id: skill-filesystem` patch 指向共享配置根，**dsh 直接读写共享文档**；数据面留在每项目 DSH_HOME。
+
+> **共享配置根（`DshHomeManager.sharedConfigRoot()`，= `dsh-home/`）**：`settings.yaml`、
+> `.credentials.yaml`、`.agent-presets/`、`skills/` 的唯一真源。路径沿用 v0.1.3-dev 以来的全局根，
+> 以免丢失用户既有的语言偏好与内测声明接受状态。插件不再参与配置同步：`syncCredentials()` 只做
+> **合并写入**（替换 `refs.DEEPSEEK_API_KEY`，保留其它 `refs` 与整个 `records` 段）。
+
+> **v0.2.3 的致命缺陷（已修复）**：旧实现把共享根配置 `copyGlobalConfigTo` **覆盖**到每项目子目录，
+> 于是 dsh 写进子目录的用户配置（自定义模型、语言）在下次启动被覆盖而**消失**；同时 `- $settings:` /
+> `- $credentials:` 这种 patch 语法被 dsh 拒绝（`patch: id is required for non-insert patches`），
+> 全局化机制从未生效。详见 `docs/PROJECT_NOTES.md`「v0.2.4 dsh 配置共享化」。
 
 > **DSH_HOME 按项目隔离（v0.1.3-dev，用户实测驱动）**：`DshHomeManager.homeDir(projectPath)` 用
 > `MD5(projectPath)` 前 16 位派生目录。dsh 的工作区注册表（`workspace.json`）与会话数据因此按项目
 > 隔离：切换项目后，新 dsh 进程的工作区只含当前项目，从机制上杜绝"显示其他项目工作区"
 > （实测：此前共享 DSH_HOME 时，仅"已打开过的旧项目"复现——dsh 记住了其历史会话状态；全新项目无
-> 此问题）。API Key：**不再向 dsh 进程注入 `DEEPSEEK_API_KEY` 环境变量**（dsh-credentials-local
-> 的 `inherited env wins` 会遮蔽 Web UI 写入，且 `assertUnshadowed` 拒绝 Web UI 的 set）。key 真源 =
-> PasswordSafe + 插件全局凭据文件；`syncCredentials(projectPath)` 在项目启动时把它们
-> 写入各项目 DSH_HOME 凭据文件（从全局复制）。dsh Web UI 改 key 写当前项目文件，由
-> `DshCredentialsSync`（WatchService）监听并在与全局不同时回写全局——使所有子项目**下次启动/重启**时一致
-> （方案B）。设置页 apply 用 `syncCredentialsAll()` 同步全局。
->
+> 此问题）。API Key：**不向 dsh 进程注入 `DEEPSEEK_API_KEY` 环境变量**（dsh-credentials-local
+> 的 `inherited env wins` 会遮蔽 Web UI 写入，且 `assertUnshadowed` 拒绝 Web UI 的 set）。
+> key 真源 = PasswordSafe + 共享 `.credentials.yaml`（v0.2.4 起由 dsh 与插件写同一份文件，无需监听同步）。
+
+> **MCP 脚本与 node_modules 链接（v0.2.4 精简）**：`mcp-ide-server.mjs` 只部署一份，位于
+> `<运行时根>/.dsh-ide-bridge/`。该位置向上查找 `node_modules` 会命中 `<运行时根>/dsh/node_modules/`
+> （dsh 自身依赖树，含 `@modelcontextprotocol/sdk` 与 `zod`），因此**每项目不再需要 `node_modules`
+> junction**（旧实现在每个项目 DSH_HOME 顶层建链接，只为让脚本解析 SDK）。运行时根不可写时降级为
+> `<共享配置根>/.dsh-ide-bridge/` + 那里**唯一一个**链接。
+
 > **升级迁移（v0.1.3-dev，用户要求）**：旧版（v0.1.2）把 session 存在全局 `dsh-home/sessions/`；
 > 升级到按项目隔离后，旧 session 目录仍在全局根但不再被读取。`DshHomeManager.ensureHome` 通过
 > `LegacySessionMigrator` 把当前项目的旧 session 目录**原样复制**（保留 `.jsonl.zstd` 压缩格式）到
@@ -443,9 +537,40 @@ stdout   = 逐行读取；含 "dsh web: http://127.0.0.1:<webPort>"
 > header 重建，无需手工迁移。详见 `LegacySessionMigrator` / `LegacySessionMigratorTest` /
 > `LegacySessionMigratorSmokeTest`。
 
+> **共享配置迁移（v0.2.4）**：`SharedConfigMigrator.migrateIfNeeded` 一次性（标记
+> `<共享根>/.plugin-layout-version`）把各项目 DSH_HOME 里的 `settings.yaml` / `.credentials.yaml` 与共享
+> 文档**合并**（共享侧优先，只补缺：缺失的顶层 namespace、缺失的 `refs` 键与 `records` 条目），原文件
+> **移入** `<共享根>/migrated/<hash>/` 备份。合并是**文本级**的（不反序列化 YAML），以保留用户注释、
+> 锚点与 `!!js` 表达式；失败时逐项目降级并**不写标记**，下次启动重试。
+
 ### 4.5 patch 模板（`ide.yml`）
 
-见 3.6；由 `McpPatchGenerator` 以实际 cordis loader 语法生成，mcpPort/token 动态填入。
+见 3.6；由 `McpPatchGenerator.generate(mcpPort, sharedConfigRoot)` 生成。**语法要点（dsh 0.1.5-rc.2 实测）**：
+`--patch` 是叠加在 bundle 之上的覆盖层，两种形态——`insert:`（新增条目，新增 mcp-client 必须显式写
+`name`）与 `- id: <rowId>`（**整份替换**该条目的 `config`，未改字段必须重述）。共享配置化的四行即用后者：
+
+```yaml
+- id: settings
+  config:
+    path: '<共享根>/settings.yaml'
+- id: credentials
+  config:
+    path: '<共享根>/.credentials.yaml'
+- id: agent-presets
+  config:
+    default: standard          # Config.default 必填，整份替换时必须重述
+    includeUserRoot: false     # 否则仍会扫描 $DSH_HOME/.agent-presets（按项目隔离的旧根）
+    roots:
+      - path: '<共享根>/.agent-presets'
+        trust: user            # 必须是第一个 user 根：copy()/remove() 只认它
+- id: skill-filesystem
+  config:
+    dshHome: '<共享根>'         # 用户技能根 = <共享根>/skills；项目根 <项目>/.dsh/skills 不变
+```
+
+> ⚠️ **不要用 `- $settings:` / `- $credentials:`**：dsh 会报
+> `patch: id is required for non-insert patches` 并丢弃整条 patch（v0.1.3-dev ~ v0.2.3 的实际故障）。
+> 校验方法：`dsh --profile web --patch <ide.yml> --dump-config`（离线组合，不启动服务）。
 
 ## 5. 数据流
 
@@ -558,3 +683,5 @@ PRD §7 验收清单 9 条（含 v0.1.3-dev 新增"DSH 一键解释"）。
 | 2026-08-23 | v0.1.3-dev | **dsh Web UI 改 API key 也要全局生效**（用户要求+选B方案）：① 去掉 `DshProcessManager` 启动时注入的 `DEEPSEEK_API_KEY` 环境变量——dsh-credentials-local 的 `resolve()` 是 `inherited env wins`，注入 env 会使 dsh 永远读旧值，且 Web UI 改 key 被 `assertUnshadowed` 直接拒绝（源码 `dsh-credentials-local lib/index.js:636`）；② 新增 `DshCredentialsSync`（`WatchService` 监听各项目 DSH_HOME 凭据文件，dsh Web UI/Models page 以 `version:1 + refs.DEEPSEEK_API_KEY` 写入该文件 → 捕获 → 回写 PasswordSafe + 插件全局凭据文件）。**方案B 语义**：改 key 的那个 dsh 进程（去 env 后读文件层，该进程立即生效），其它项目**下次启动/重启**时 `syncCredentials()`/`ensureHome()` 从全局复制+透传 → 全局一致。监听器随项目 Disposable 释放（`DshCredentialsSync.release(projectName)`）。`onFileChanged` 仅当子项目 key 与全局不同才回写（无自激循环）。新增 DshCredentialsSyncTest 6 例 |
 | 2026-08-30 | v0.2.0 | **macOS / Linux 主机兼容（瘦身通用插件 + 按平台下载运行时）**：① `Platform`（os/arch→target/nodeBinName/assetName，前缀匹配防 `darwin`/`win` 冲突）；`DshHomeManager.nodeExe()` 平台化，`DshProcessManager.killTree` 跨平台进程树，symlink 兜底仅 Windows；② `RuntimeProvisioner`+`RuntimeArchive`+`RuntimeAssets`（`runtime-assets.json` 资产地图；下载+`.sha256` 校验+安全解压；`DSH_IDEA_RUNTIME`/手动路径离线逃生）；设置页「运行时下载地址」；③ `build-runtime.mjs`（跨平台，任意主机产出 `runtime-<os>-<arch>.zip`+`.sha256`）；Gradle `buildRuntime` 改调 mjs、瘦身默认（`-Pthin=false` 保留 fat）、新增 Gradle wrapper；④ `.github/workflows/build-release.yml` 矩阵 + `docs/release-runtime.md`；测试 100/100（PlatformTest/RuntimeAssetsTest/RuntimeProvisionerTest） |
 | 2026-09-15 | v0.2.3 | dsh 运行时 0.1.1-rc.2 → **0.1.5-rc.2**：① 常量与脚本同步（`DshHomeManager.DSH_VERSION`、`build.gradle.kts` `dshVersion`、`scripts/build-runtime.mjs`/`.ps1` 默认值）；重建 win-x64 运行时并更新 `release-assets/`。② **浏览器鉴权（0.1.5 新增）**：启动行 `dsh web: http://127.0.0.1:<port>/?token=<t>`；`GET /`（无 token）401，`GET /?token=` 303 + `Set-Cookie: dsh-auth-<authority-hash>=v1.…`；`/api` 一律要该 cookie。`PortParser.parseUrl` 保留完整 URL；`DshProcessManager.launchUrl` 供 JCEF/健康检查/`onUrlReady`（健康检查 `instanceFollowRedirects=false`，`200..399 || 401` 视为就绪）；`WorkspaceInitializer.bootstrapSessionCookie` 换取 cookie。③ **RPC 契约**：`workspace/<method>` 斜杠命名空间；信封 `{"type":"client-request","rpcId","method","payload":{"args":{"request":{…}}}}`；`workspace/list` 移除，置顶顺序改读 `storages/workspace.json` v2 `global.workspaceIds`（新增 `waitWorkspaceOrder`/`readWorkspaceOrder`）。④ 未适配（已知降级）：0.1.5 composer 由 `<textarea>` 改 Lexical contenteditable，JS 注入走剪贴板兜底。**五平台运行时**（新增 macOS x64 / Linux arm64）由本地交叉构建补齐（`build-runtime.mjs`：符号链接容错 / 主机 node 执行 npm / `--libc glibc` / 按主机能力选 zip 命令）。**设置页**：「运行时下载地址」反显当前生效值 + 默认按钮、「运行时目录」新设置项（默认按钮填入插件默认目录，**等价于未设置**）、本地 zip 选择器修复（`chooseJars`）与 VFS 暂存导入、错误卡换行与诊断。**IDE 边界**：2024.1.7 / 2024.3.2 / 2026.2 编译（含测试代码）全部通过。测试 **130 项全部通过** |
+| 2026-09-17 | v0.2.4 | **修复"发送选中代码 / 日志一键解释 没反应"**（用户报告，真实页面 CDP 实测定位）。根因三项：① dsh 0.1.5 的 composer 是 **Lexical `contenteditable`**（`<div data-lexical-editor="true" role="textbox" contenteditable="true">`），旧的 `document.querySelector('textarea')` 命中 0 → 注入静默失败；② 回读判定读错位置——Lexical 文本在 `[data-lexical-text="true"]` 节点里，写入**当拍**根元素 `innerText`/`textContent` 可能为空，导致"已成功注入"被误判为失败并降级剪贴板；③ 输入框**仅在进入会话后**渲染（停在内测声明/"选择工作区"时命中 0），需重试等待。**修复**：新增纯对象 `ComposerScripts`（可单测）统一构造注入脚本——选择器四级回退、contenteditable 走 `execCommand('insertText')`（派发 `beforeinput`，Lexical 据此同步内部状态；失败退回合成 `paste`）、回读走 `[data-lexical-text]` 并轮询 ≤2s、提交用带 `keyCode/which` 的 Enter 后轮询清空判 `submitted`、兜底点发送按钮（不用 class 通配）；结果语义扩为 `injected/submitted/blocked/notfound/failed`，仅后两者降级剪贴板+通知（不再"脚本已下发"即乐观提示）。`sendSelection` 与 `sendQuestion` 共用该脚本，`PendingSend` 增加 `kind` 区分回传处理。**验证**：headless Edge + CDP 在真实 dsh 0.1.5 页面上对照实测——`insertText` ✅（`execReturn=true`，立即回读命中）、合成 `beforeinput` ❌、纯改 DOM ❌、Enter 提交 501ms 内清空 ✅；新增 `ComposerScriptsTest`（11 例）锁定契约。测试 **194 项全部通过** |
+| 2026-09-17 | v0.2.4 | **dsh 配置共享化：修复"新模型 / API Key / Agent 预设重启后消失"**（用户实测驱动）。**根因三重（实测）**：① `DshHomeManager.ensureHome` 的 `copyGlobalConfigTo` 每次启动把共享根 `settings.yaml`/`.credentials.yaml` **`REPLACE_EXISTING` 覆盖**到每项目 DSH_HOME，而 dsh 的配置真源是 `$DSH_HOME`（`dsh-home-paths` 解析顺序：显式配置 > `$DSH_HOME` > `~/.dsh`；Web「Models」页写的 `llm-pi-ai`/`llm-deepseek`、语言 `locale` 都落项目子目录）→ 下次启动被清空；② 全局化用的 `- $settings:` / `- $credentials:` patch 语法**被 dsh 拒绝**：`dsh --profile web --patch <ide.yml> --dump-config` 报 `patch: id is required for non-insert patches`，整条 patch 被丢弃；③ `DshBridgeManager.writePatch()` 从未把共享根传给 `McpPatchGenerator`（`globalConfigDir` 走默认空值）。**方案（§4.4/§4.5）**：删除 `copyGlobalConfigTo`；patch 改 `- id: settings` / `- id: credentials` / `- id: agent-presets`（整份覆盖须重述必填 `default: standard`，并置 `includeUserRoot: false` 以免再扫 `$DSH_HOME/.agent-presets`）/ `- id: skill-filesystem`（`dshHome`）四段——共享面 = 设置文档 + 凭据 + Agent 预设 + 个人技能；数据面（`sessions`/`storages`/附件）仍按项目隔离（dsh 全库仅 `dshHomePath('sessions'\|'storages')` 两处）。**配套**：① 新增 `SharedConfigMigrator`（标记 `<共享根>/.plugin-layout-version`）——按顶层 namespace 与 `refs`/`records` 做**文本级**合并（共享侧优先、只补缺，保留注释/`!!js`；扁平凭据内联升级为 `version:1`），原文件移入 `<共享根>/migrated/<hash>/` 备份，逐项目失败降级且不写标记；② `syncCredentials()` 改 `YamlText.upsertRef` 合并写入（只替换 `refs.DEEPSEEK_API_KEY`，不再用扁平 layout 整份覆盖、不再抹掉 dsh 的 `records.client-connection/browser-session`）；③ `DshCredentialsSync` 废弃为空操作（dsh 与插件写同一份共享凭据）；④ **MCP 脚本零链接**：部署在 `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/`——Node 的 ESM 解析按**真实路径**查找、**不越过 junction**（实测放 `<运行时根>/.dsh-ide-bridge/` 会 `ERR_MODULE_NOT_FOUND`），故**删除每项目 `node_modules` junction**，`cleanLegacySharedRoot`/`cleanLegacyProjectHome` 清理历史残留；⑤ 设置页新增「共享配置目录」只读展示 + 打开按钮，API Key 回显改读共享文档的 `refs` 段。新增 `SharedConfigMigratorTest`（23 例）、重写 `McpPatchGeneratorTest`（11 例，含"绝不出现 `$id` 形态"回归断言）。**测试环境对齐**：`tooling/runtime-dev` 原为 dsh **0.1.1-rc.2**（与 `DSH_VERSION` 不一致，导致 2 个 workspace 冒烟长期失败：旧契约点号 RPC、启动 URL 无 token），已用 `build/runtime-win-x64.zip` 对齐到 **0.1.5-rc.2**（Node 22.23.2），旧树留作 `tooling/runtime-dev/{node,dsh}-0.1.1-backup`。测试 **194 项全部通过**（含 4 个真实 dsh 冒烟） |

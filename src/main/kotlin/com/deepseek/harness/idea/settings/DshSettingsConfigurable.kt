@@ -189,6 +189,27 @@ class DshSettingsConfigurable : SearchableConfigurable {
         val status = JBLabel(" ")
         importStatus = status
 
+        // 共享配置目录（v0.2.4）：dsh 的用户级配置（模型/凭据/Agent 预设/个人技能）全部在这里，
+        // 所有项目共享。Web「Settings → Models」改的正是该目录下的 settings.yaml。
+        val sharedRoot = runCatching { DshHomeManager.getInstance().sharedConfigRoot().toString() }.getOrNull().orEmpty()
+        val sharedRootField = JBTextField(sharedRoot).apply {
+            isEditable = false
+            columns = 40
+            toolTipText = DshBundle.message("settings.sharedHome.hint")
+        }
+        val openSharedButton = JButton(DshBundle.message("settings.sharedHome.open")).apply {
+            addActionListener {
+                runCatching {
+                    val dir = DshHomeManager.getInstance().sharedConfigRoot().toFile()
+                    if (dir.isDirectory) java.awt.Desktop.getDesktop().open(dir)
+                }
+            }
+        }
+        val sharedRow = JPanel(BorderLayout()).apply {
+            add(sharedRootField, BorderLayout.CENTER)
+            add(openSharedButton, BorderLayout.EAST)
+        }
+
         return FormBuilder.createFormBuilder()
             .addLabeledComponent(JBLabel(DshBundle.message("settings.apiKey.label")), apiKey, 1, false)
             .addLabeledComponent(JBLabel(DshBundle.message("settings.model.label")), model, 1, false)
@@ -200,6 +221,7 @@ class DshSettingsConfigurable : SearchableConfigurable {
             .addLabeledComponent(JBLabel(DshBundle.message("settings.runtimeDir.label")), runtimeDirRow, 1, false)
             .addComponent(localRow)
             .addLabeledComponent(JBLabel(DshBundle.message("settings.runtimeDownload.timeout.label")), timeout, 1, false)
+            .addLabeledComponent(JBLabel(DshBundle.message("settings.sharedHome.label")), sharedRow, 1, false)
             .addComponent(JBLabel(DshBundle.message("settings.apply.note")))
             .addVerticalGap(8)
             .panel
@@ -252,7 +274,9 @@ class DshSettingsConfigurable : SearchableConfigurable {
         if (key.isNotEmpty() && key != DshCredentials.maskApiKey(storedApiKey)) {
             DshCredentials.writeApiKey(key)
             storedApiKey = key
-            // 同步写入各项目 DSH_HOME 凭据文件（按项目隔离，v0.1.3-dev；运行中的会话需重启生效）
+            // 合并写入**共享**凭据文件（`<共享根>/.credentials.yaml`）：只更新 refs.DEEPSEEK_API_KEY，
+            // 保留其它 provider 的 refs 与 records（v0.2.3 及以前是扁平整份覆盖，会丢数据）。
+            // 运行中的会话需重启生效。
             ApplicationManager.getApplication().executeOnPooledThread {
                 DshHomeManager.getInstance().syncCredentialsAll()
             }
@@ -275,11 +299,12 @@ class DshSettingsConfigurable : SearchableConfigurable {
     }
 
     /**
-     * 读取当前真实的 API Key：先 PasswordSafe，回退到插件全局 DSH_HOME 的 `.credentials.yaml`。
+     * 读取当前真实的 API Key：先 PasswordSafe，回退到**共享**凭据文件
+     * `<共享根>/.credentials.yaml`（dsh `version: 1` 文档，按 `refs` 段定位）。
      * 返回的 Key 用于 apply 时区分"用户未改"与"输入新值"，避免把脱敏串当真实 key 写回。
      */
     private fun readStoredApiKey(): String? {
-        val globalCredFile = DshHomeManager.getInstance().globalConfigHome().resolve(".credentials.yaml")
-        return DshCredentials.readApiKeyWithFallback(globalCredFile)
+        val sharedCredFile = DshHomeManager.getInstance().sharedCredentialsPath()
+        return DshCredentials.readApiKey() ?: DshCredentials.readApiKeyFromSharedDocument(sharedCredFile)
     }
 }

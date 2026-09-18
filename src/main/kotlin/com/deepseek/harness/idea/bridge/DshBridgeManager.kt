@@ -54,18 +54,22 @@ class DshBridgeManager(
     fun writePatch(): Path {
         val port = mcpPort
         require(port > 0) { "MCP server not ready" }
-        val patch = McpPatchGenerator.generate(port)
+        // 共享配置根（v0.2.4）：patch 把 dsh 的 settings / credentials / agent-presets / 用户技能
+        // 全部指向该目录（`- id: <rowId>` 整份覆盖形态），实现"配置共享 + 数据隔离"。
+        val sharedRoot = com.deepseek.harness.idea.runtime.DshHomeManager.getInstance().sharedConfigRoot().toString()
+        val patch = McpPatchGenerator.generate(port, sharedRoot)
         val file = homeDir.resolve("ide.yml")
         Files.createDirectories(file.parent)
         Files.writeString(file, patch, StandardCharsets.UTF_8)
-        LOG.info("wrote ide.yml (mcpPort=$port) -> $file")
+        LOG.info("wrote ide.yml (mcpPort=$port, sharedConfigRoot=$sharedRoot) -> $file")
         return file
     }
 
     private fun startMcpServer() {
         try {
-            // mcp-ide-server.mjs 部署在按项目隔离的 DSH_HOME 顶层（v0.1.3-dev）
-            val script = homeDir.resolve("mcp-ide-server.mjs")
+            // v0.2.4：脚本全局唯一一份，部署在运行时根（依赖由运行时树的 node_modules 解析，
+            // 不再需要项目级 node_modules junction）。见 DshHomeManager.ensureMcpServerScript。
+            val script = com.deepseek.harness.idea.runtime.DshHomeManager.getInstance().mcpServerScript()
             if (!Files.isRegularFile(script)) {
                 LOG.error("mcp-ide-server.mjs not deployed: $script")
                 return

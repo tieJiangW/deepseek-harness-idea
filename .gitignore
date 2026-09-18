@@ -10,27 +10,31 @@ build/
 # ---- Kotlin ----
 .kotlin/
 
-# ---- 本机开发工具（Gradle 发行版 + Node/dsh 运行时，体积大，不入库）----
+# ---- 鏈満寮€鍙戝伐鍏凤紙Gradle 鍙戣鐗?+ Node/dsh 杩愯鏃讹紝浣撶Н澶э紝涓嶅叆搴擄級----
 tooling/
 
-# ---- 本地配置 / 密钥 ----
+# ---- 鏈湴閰嶇疆 / 瀵嗛挜 ----
 local.properties
 .env
 *.credentials.yaml
 credentials.yaml
 
-# ---- 日志 ----
+# ---- 鏃ュ織 ----
 *.log
 
-# ---- 操作系统 ----
+# ---- 鎿嶄綔绯荤粺 ----
 .DS_Store
 Thumbs.db
 
-# ---- dsh 运行时数据（防御性；正常位于 IDE 配置目录）----
+# ---- dsh 杩愯鏃舵暟鎹紙闃插尽鎬э紱姝ｅ父浣嶄簬 IDE 閰嶇疆鐩綍锛?---
 sessions/
 storages/
 /runtime/
 dsh-home*/
 
-# ---- 发布产物（各平台运行时 zip 约 100MB+，只随 GitHub Release 上传，不入库）----
+# ---- 鍙戝竷浜х墿锛堝悇骞冲彴杩愯鏃?zip 绾?100MB+锛屽彧闅?GitHub Release 涓婁紶锛屼笉鍏ュ簱锛?---
 release-assets/
+
+# ---- 鏈湴鍑嵁鎶曟斁锛堢粷涓嶅叆搴擄級----
+.secrets*
+.tmp-*

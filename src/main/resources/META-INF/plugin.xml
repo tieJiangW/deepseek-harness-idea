@@ -23,6 +23,9 @@
             workflows) runs in an IDE tool window via JCEF.</li>
             <li><b>Workspace-bound agent</b> — the agent works with your current project directory as
             its workspace (auto-registered on startup); it can read, create and modify project files.</li>
+            <li><b>Shared configuration across projects</b> — models, providers, API keys, agent presets and
+            personal skills live in one shared config home, so configuring them once applies to every project;
+            sessions, workspaces and attachments stay isolated per project.</li>
             <li><b>IDE context via MCP</b> — the agent can read your current editor selection, open
             files and project tree, and open/reveal files, through the <code>mcp__ide__*</code> tools.</li>
             <li><b>Send selection to DSH</b> — right-click any code selection to send a compact file
@@ -72,6 +75,8 @@
             JCEF 在 IDE 工具窗口中运行。</li>
             <li><b>以项目为工作区</b> — 智能体以当前项目目录为工作区（启动时自动注册）；可读取、
             新建、修改项目文件。</li>
+            <li><b>配置跨项目共享</b> — 模型、供应商、API Key、Agent 预设与个人技能存放于统一的共享配置目录，
+            配置一次即对所有项目生效；而会话、工作区与附件仍按项目隔离。</li>
             <li><b>MCP 桥接 IDE 上下文</b> — 智能体可通过 <code>mcp__ide__*</code> 工具读取当前
             选中代码、打开的文件、项目树，并打开/定位文件。</li>
             <li><b>发送选中代码到 DSH</b> — 右键选中代码即可发送紧凑文件引用
@@ -110,6 +115,43 @@
 
     <change-notes><![CDATA[
         <h3>English / 中文</h3>
+        <h4>v0.2.4</h4>
+        <ul>
+            <li><b>Configuration is now shared across projects.</b> Models, providers, API keys, agent presets and
+            personal skills live in one shared config home again, so configuring them once applies to every project
+            (sessions, workspaces and attachments stay isolated per project). This fixes custom models, API keys and
+            agent presets silently disappearing after an IDE restart: the plugin used to overwrite the per-project
+            config with a global copy on every start, and the patch section meant to redirect that config was rejected
+            by dsh. Existing per-project config files are merged into the shared document and backed up under
+            <code>migrated/</code>, never deleted. The Settings page now shows the shared config directory and can open
+            it.</li>
+            <li><b>配置改为跨项目共享。</b>模型、供应商、API Key、Agent 预设与个人技能重新统一存放在共享配置目录，
+            配置一次即对所有项目生效（会话、工作区与附件仍按项目隔离）。此举修复"自定义模型 / API Key / Agent 预设
+            重启 IDE 后消失"：此前插件每次启动都用全局副本覆盖项目配置，而用于重定向配置的 patch 段又被 dsh 拒绝生效。
+            既有的项目级配置文件会合并进共享文档并备份到 <code>migrated/</code>，绝不删除。设置页新增"共享配置目录"
+            展示与打开入口。</li>
+        </ul>
+        <ul>
+            <li><b>MCP bridge script is now a single shared copy.</b> It is deployed inside the dsh installation tree and
+            resolves its dependencies from there, so the per-project <code>node_modules</code> link is gone (Node's ESM
+            resolution does not traverse directory links).</li>
+            <li><b>MCP 桥接脚本改为全局唯一一份。</b>脚本部署在 dsh 安装树内并从那里解析依赖，因此不再需要每个项目
+            创建 <code>node_modules</code> 目录链接（Node 的 ESM 解析不会穿透目录链接）。</li>
+        </ul>
+        <ul>
+            <li><b>"Send selection" and "Explain log" now work on dsh 0.1.5.</b> The composer is a Lexical
+            <code>contenteditable</code> editor, so the old injection no longer found a <code>&lt;textarea&gt;</code>.
+            The injection was rewritten for the Lexical editor and verified against a real dsh page; duplicate file
+            references no longer accumulate when the action is triggered twice.</li>
+            <li><b>"发送选中代码"与"日志一键解释"已在 dsh 0.1.5 上恢复可用。</b>输入框是 Lexical
+            <code>contenteditable</code> 编辑器，旧的注入方式已找不到 <code>&lt;textarea&gt;</code>；现按 Lexical
+            重写并在真实 dsh 页面上验证；同时修复了动作被触发两次时文件引用重复叠加的问题。</li>
+        </ul>
+        <ul>
+            <li><b>macOS verified.</b> The plugin was tested end-to-end on macOS (Apple Silicon), in addition to the
+            existing Windows / Linux runs.</li>
+            <li><b>macOS 已验证。</b>除既有的 Windows / Linux 外，本版本已在 macOS（Apple Silicon）完成端到端测试。</li>
+        </ul>
         <h4>v0.2.3</h4>
         <ul>
             <li><b>Runtime upgraded to DeepSeek Harness 0.1.5-rc.2, with full integration adaptation.</b>

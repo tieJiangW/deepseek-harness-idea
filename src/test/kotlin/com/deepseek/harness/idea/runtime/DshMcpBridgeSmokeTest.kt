@@ -116,7 +116,11 @@ class DshMcpBridgeSmokeTest {
         bridge.start()
         mockBridge = bridge
 
-        // 2) 构造最小 DSH_HOME + 顶层 node_modules junction（MCP server 需解析 SDK）
+        // 2) v0.2.4 生产布局：MCP 脚本全局唯一一份，部署在**真实运行时树的**
+        //    `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/`。该位置向上查找 node_modules
+        //    会命中 `<运行时根>/dsh/node_modules`（dsh 自身依赖树）——这是"不再需要任何 junction"的关键：
+        //    Node 的 ESM 解析按**真实路径**查找、**不越过 junction**（实测），所以脚本必须真正落在
+        //    dsh 树内部。本测试直接用真实运行时树，parse 失败即断言失败（回归门）。
         val home = tempDir.resolve("dsh-home")
         val web = home.resolve("profiles/web")
         Files.createDirectories(web)
@@ -127,12 +131,21 @@ class DshMcpBridgeSmokeTest {
         )
         Files.writeString(web.resolve("cordis.yml"), "[]\n", StandardCharsets.UTF_8)
         Files.writeString(web.resolve("cordis.patch.yml"), "[]\n", StandardCharsets.UTF_8)
-        Files.writeString(home.resolve(".credentials.yaml"), "DEEPSEEK_API_KEY: sk-dummy-for-test\n", StandardCharsets.UTF_8)
-        createJunction(home.resolve("node_modules"), root.resolve("dsh/node_modules"))
+        // 断言：项目 DSH_HOME 里**没有** node_modules junction（v0.2.4 起不再需要）
+        assertTrue(
+            !Files.exists(home.resolve("node_modules"), java.nio.file.LinkOption.NOFOLLOW_LINKS),
+            "v0.2.4 must not create a per-project node_modules junction",
+        )
 
-        // 3) 部署并启动 mcp-ide-server.mjs
-        val script = home.resolve("mcp-ide-server.mjs")
+        val bridgeDir = Files.createDirectories(
+            root.resolve("dsh/node_modules/@deepseek-ai/${DshHomeManager.MCP_BRIDGE_PACKAGE}")
+        )
+        val script = bridgeDir.resolve(DshHomeManager.MCP_SERVER_SCRIPT)
         Files.writeString(script, IdeBridgeResources.mcpServerScript()!!, StandardCharsets.UTF_8)
+        // 该目录的 ESM 解析必须命中运行时依赖树（不越过任何链接）
+        assertEsmResolves(nodeExe, bridgeDir)
+
+        val sharedHome = Files.createDirectories(tempDir.resolve("shared-config"))
         val mcpEnv = mutableMapOf(
             "DSH_IDE_BRIDGE_URL" to "http://127.0.0.1:${bridge.address.port}",
             "DSH_IDE_TOKEN" to token,
@@ -162,8 +175,10 @@ class DshMcpBridgeSmokeTest {
         val refreshText = rpc(mcpPort, "tools/call", mapOf("name" to "ide_refresh_files", "arguments" to emptyMap<String, Any>()))
         assertTrue(refreshText.contains("refreshed"), "tools/call ide_refresh_files should return bridge data; got: $refreshText")
 
-        // 6) dsh web 带 failOnStartupError patch 启动：连接失败会拒绝启动，故能起来即证明 MCP 链路通
-        val patch = McpPatchGenerator.generateStrict(mcpPort)
+        // 6) dsh web 带 failOnStartupError + 共享配置 patch 启动：连接失败会拒绝启动，故能起来即证明
+        //    MCP 链路与 patch 语法（`- id: settings` / `- id: credentials` / `- id: agent-presets` /
+        //    `- id: skill-filesystem`）都正确。
+        val patch = McpPatchGenerator.generateStrict(mcpPort, sharedHome.toString())
         val patchFile = home.resolve("ide.yml")
         Files.writeString(patchFile, patch, StandardCharsets.UTF_8)
 
@@ -184,16 +199,80 @@ class DshMcpBridgeSmokeTest {
         assertTrue(webUrl != null, "dsh web should boot with strict mcp patch (failOnStartupError)")
         // 0.1.5：启动 URL 带 ?token=，首个 GET 返回 303（换取鉴权 cookie 的重定向）→ 接受 2xx/3xx
         assertTrue(httpStatus(webUrl!!) in 200..399, "web ui should answer 2xx/3xx")
+
+        // 7) 共享配置化生效：凭证/设置由 dsh 写在**共享配置根**，项目 DSH_HOME 里不产生这两个文件。
+        assertTrue(
+            !Files.exists(home.resolve("settings.yaml")),
+            "settings must live in the shared config root, not in the per-project DSH_HOME",
+        )
+        assertTrue(
+            !Files.exists(home.resolve(".credentials.yaml")),
+            "credentials must live in the shared config root, not in the per-project DSH_HOME",
+        )
+        val sharedCredentials = waitForFile(sharedHome.resolve(".credentials.yaml"), 30)
+        assertTrue(sharedCredentials, "dsh must create the web-session record in the SHARED credentials file")
+        assertTrue(
+            Files.readString(sharedHome.resolve(".credentials.yaml"), StandardCharsets.UTF_8)
+                .contains("client-connection/browser-session"),
+            "the shared credentials file must carry dsh's own records section",
+        )
     }
 
     // ---- 辅助 ----
 
+    /**
+     * 断言 [dir] 下的 ESM 裸包解析能命中 dsh 依赖树。
+     *
+     * 这是 v0.2.4「MCP 脚本零链接」的核心回归门：脚本部署在
+     * `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/`，靠向上查找 `dsh/node_modules` 解析
+     * `@modelcontextprotocol/sdk` 与 `zod/v4`。Node **不越过 junction**（实测），放错位置会
+     * `ERR_MODULE_NOT_FOUND`，故此处显式验证解析结果。
+     */
+    private fun assertEsmResolves(nodeExe: File, dir: Path) {
+        val probe = dir.resolve("resolve-probe.mjs")
+        Files.writeString(
+            probe,
+            """
+            const sdk = import.meta.resolve('@modelcontextprotocol/sdk/server/mcp.js');
+            const zod = import.meta.resolve('zod/v4');
+            console.log('SDK_RESOLVED=' + sdk);
+            console.log('ZOD_RESOLVED=' + zod);
+            """.trimIndent(),
+            StandardCharsets.UTF_8
+        )
+        try {
+            val p = ProcessBuilder(nodeExe.absolutePath, probe.toString()).redirectErrorStream(true).start()
+            val out = p.inputStream.bufferedReader().readText()
+            p.waitFor(30, TimeUnit.SECONDS)
+            assertTrue(
+                out.contains("SDK_RESOLVED=") && out.contains("ZOD_RESOLVED="),
+                "ESM resolution must reach the dsh dependency tree from $dir; output:\n$out",
+            )
+        } finally {
+            runCatching { Files.deleteIfExists(probe) }
+        }
+    }
+
     private fun createJunction(link: Path, target: Path) {
-        val p = ProcessBuilder("cmd", "/c", "mklink", "/J", link.toString(), target.toString())
-            .redirectErrorStream(true)
-            .start()
-        p.waitFor(10, TimeUnit.SECONDS)
-        assertTrue(Files.exists(link), "junction creation failed: $link -> $target")
+        linkDir(link, target)
+    }
+
+    /** 建目录链接（Windows 用 junction `mklink /J`，无需管理员；其它平台用符号链接）。 */
+    private fun linkDir(link: Path, target: Path) {
+        Files.createDirectories(link.parent)
+        if (Files.exists(link, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return
+        val created = if (com.deepseek.harness.idea.runtime.Platform.current().os ==
+            com.deepseek.harness.idea.runtime.Platform.Os.WINDOWS
+        ) {
+            val p = ProcessBuilder("cmd", "/c", "mklink", "/J", link.toString(), target.toString())
+                .redirectErrorStream(true)
+                .start()
+            p.waitFor(10, TimeUnit.SECONDS)
+            Files.exists(link, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        } else {
+            runCatching { Files.createSymbolicLink(link, target) }.isSuccess
+        }
+        assertTrue(created, "directory link creation failed: $link -> $target")
     }
 
     private fun spawn(nodeExe: File, args: List<String>, cwd: File, extraEnv: Map<String, String>): Process {
@@ -287,6 +366,16 @@ class DshMcpBridgeSmokeTest {
             }
             else -> sb.append('"').append(v).append('"')
         }
+    }
+
+    /** 等待文件出现（异步落盘），返回是否在超时内出现。 */
+    private fun waitForFile(path: Path, timeoutSeconds: Long): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
+        while (System.nanoTime() < deadline) {
+            if (Files.isRegularFile(path)) return true
+            Thread.sleep(300)
+        }
+        return Files.isRegularFile(path)
     }
 
     private fun httpStatus(url: String): Int {
