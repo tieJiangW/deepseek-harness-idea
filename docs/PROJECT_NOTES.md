@@ -417,6 +417,62 @@ second: outcome=skipped-existing   ← 第二次点击被正确跳过（说明�
 **教训**：对 Lexical 这类"异步渲染的受控编辑器"，**不能在写入后立即回读做补救决策**；
 "写入路径唯一 + 异步重试"才是安全形态。
 
+### macOS 适配与 fat 包构造（v0.2.4 用户实测通过）
+
+**结论**：插件在 **macOS（Apple Silicon）** 由用户端到端实测通过（安装 → 启动 dsh → 对话 → MCP 工具链）。
+插件侧的 macOS 相关点如下：
+
+- **运行时分平台下发**：Windows x64、macOS arm64/x64、Linux x64/arm64 各一份 `runtime-<os>-<arch>.zip` +
+  `.sha256`；`macos-x64` 与 `linux-arm64` 无法在 GitHub-hosted runner 构建，由本地交叉构建后上传。
+- **`bundleRuntime` 只认当前主机平台**：`build.gradle.kts` 里 `bundleRuntime` 取
+  `build/runtime-${hostOs}-${hostArch}.zip`，因此在 Windows 上 `-Pthin=false` 只会产出 **Windows** fat 包。
+  要给用户 macOS fat 包，用 **`scripts/build-mac-fat.ps1`**（把指定平台运行时作为
+  `deepseek-harness-idea/runtime-bundle.zip` 注入 thin 包，即 `DshHomeManager.extractBundledRuntime`
+  首启会解压的那个资源）。
+- **可执行位由代码兜底**：zip 在 Windows 上打包会丢掉 Unix 权限位，但
+  `RuntimeArchive.unzip` 在非 Windows 上会对 `node/<nodeBinName>` 调 `setExecutable(true)`（源码第 71/78-85 行），
+  所以解压后 `node` 可执行；万一仍报 `EACCES`，手动 `chmod +x "<运行时目录>/node/node"`。
+- **Gatekeeper**：首次运行交叉构建的 `node` 可能被拦 → 系统设置放行或
+  `xattr -dr com.apple.quarantine <运行时目录>`。
+- **JCEF**：需以带 JCEF 的 JBR 启动；2026.2 起还需启用内置插件 "Web Browser (JCEF)"。
+
+**构造 macOS fat 包的验收入口**（`scripts/build-mac-fat.ps1` 会自检）：包内须同时存在
+`lib/instrumented-deepseek-harness-idea-<ver>.jar` 与 `runtime-bundle.zip`，且后者内含
+`node/node`、`dsh/node_modules/@deepseek-ai/dsh/lib/bin.js`；平台原生依赖须齐全
+（arm64：`@img/sharp-darwin-arm64`、`@koromix/koffi-darwin-arm64`、`node-addon-require-builtin-darwin-arm64`；
+x64 对应 `*-darwin-x64`）。
+
+**本地冒烟环境版本必须与 `DSH_VERSION` 一致**：`tooling/runtime-dev` 曾长期停留在 dsh **0.1.1-rc.2**，
+导致 2 个真实 dsh 冒烟（`DshBootstrapSmokeTest` / `WorkspaceInitializerSmokeTest`）**长期失败**且原因误导
+（旧契约：点号 RPC `workspace.create`、启动 URL 无 `?token=`）。已用 `build/runtime-win-x64.zip` 对齐到
+0.1.5-rc.2，旧树留在 `tooling/runtime-dev/{node,dsh}-0.1.1-backup` 备查。**升级 dsh 时务必同步该目录。**
+
+### 发布踩坑（v0.2.4 实操，GitHub Release + Marketplace）
+
+- **本地 main 与远端 main 可能是"同一批提交的不同哈希"（rebase 双胞胎）**：`git log origin/main..HEAD`
+  会显示一堆"待推送"提交，而 `git diff HEAD origin/main` 却是**空**（内容一致）。
+  处理：先用 API 查远端真实 HEAD（`GET /repos/{o}/{r}/commits/main`），再
+  `git reset --mixed origin/main` 对齐历史，然后只提交本次改动 —— 避免推送重复提交。
+  ⚠️ `git ls-remote` 在本机不稳定（编码 + 凭据），**用 API 判断远端状态更可靠**。
+- **Release API 建 tag 时指向"默认分支当前 HEAD"**：必须先 `git push` 代码、再创建 Release，
+  否则远端 `v0.2.x` 会指向**旧的 main**（内容缺本次改动）。已产生漂移时用
+  `git push <url> refs/tags/vX.Y.Z:refs/tags/vX.Y.Z --force` 修正；本地 tag 用 `git tag -f vX.Y.Z <sha>` 对齐。
+- **推送要用 token 内嵌 URL**：`git push "https://x-access-token:$pat@github.com/<o>/<r>.git" main`
+  （无 TTY 时 `git push origin` 会因凭据对话框失败）。`main` 有分支保护，管理员 PAT 可直推并提示
+  `Bypassed rule violations`（正常）。
+- **`git add -A` + 临时消息文件 = 误提交**：`.tmp-commitmsg.txt` / `.tmp-msg2.txt` 都曾被带进提交。
+  处理：`.gitignore` 提前加 `.tmp-*` 与 `.secrets*`；已误提交时
+  `git rm --cached <f>` + `git commit --amend`（同一提交）或 `git reset --soft <base>` 后重新提交。
+  ⚠️ `git commit --amend -F` 传错消息文件会产生**两条重复消息**——amend 后要核对 message。
+- **`<change-notes>` 顺序即"更新说明"**：IDE 与 Marketplace **只显示最顶部那条**，新增版本条目必须插到
+  **最前**（v0.2.4 曾被我插到 v0.2.3 下面，导致更新说明不显示本次内容）。
+- **凭据卫生**：`.secrets*` / `.tmp-*` 入 `.gitignore`；脚本只从环境变量读 token
+  （`scripts/release-v0.2.4.mjs`）；发布后用 **`scripts/secret-audit.mjs`** 自检
+  （提交信息 / 仓库文本文件 / Release 正文 / 本地工作区），v0.2.4 扫描结果 `AUDIT PASS`。
+- **`github.com:443` 可能间歇不通**：本次首轮 push 成功，之后 push 超时；此时 API 与 uploads 仍可用，
+  改走 `RELEASE_PROCESS.md` §8 的纯 API 通道（`git push` 用 Node 的 `fetch` 版 Git Data API 替代）。
+- 完整实操流程与命令见 **`RELEASE_PROCESS.md`**；本次发布记录见 `docs/releases/v0.2.4.md`。
+
 ### FileChooser 隐藏 .zip（v0.2.3 实测：设置页"Choose local runtime zip…"看不到文件）
 
 - **现象**：设置页选本地运行时 zip 时，文件选择器**只显示文件夹、看不到任何 .zip**（用户截图）。

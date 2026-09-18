@@ -10,11 +10,15 @@
 
 | 用途 | 变量/位置 | 获取方式 |
 | --- | --- | --- |
-| GitHub 推送与 Release API | `GITHUB_PAT`（`ghp_...` / 细粒度 PAT） | GitHub → Settings → Developer settings → Personal access tokens |
+| GitHub 推送与 Release API | `GITHUB_PAT`（`ghp_...` / `github_pat_...`） | GitHub → Settings → Developer settings → Personal access tokens |
 | Marketplace 上传 | `MARKETPLACE_TOKEN`（`perm-...`，永久令牌） | Marketplace 个人面板 → **My Tokens** |
 
-- PAT 需要 `repo`（或对目标仓库 `Contents: read/write`）权限。
-- **凭据绝不写入仓库、日志或文档**。用环境变量或当轮注入；泄露后立即轮换。
+- PAT 需要 `repo`（或对目标仓库 `Contents: read/write`）；实测 `scopes=repo, workflow` 足够跑完全流程。
+- **凭据只从环境变量读**：`scripts/release-v0.2.4.mjs` 即按此实现（`process.env.GITHUB_PAT` /
+  `process.env.MARKETPLACE_TOKEN`），**脚本内绝不出现明文**。用完请到 GitHub / Marketplace **撤销并重新生成**。
+- 临时投放与消息文件一律用 `.secrets*` / `.tmp-*` 命名（已在 `.gitignore`），避免误提交。
+- 发布后用 **`scripts/secret-audit.mjs`** 自检是否泄漏（提交信息 / 仓库文本文件 / Release 正文 / 本地工作区）：
+  它自身不含任何凭据，需要比对的明文通过 `AUDIT_NEEDLES` 传入。
 - **版本号变更需先获得用户确认**（本仓库约定）。
 
 **构建环境**：Gradle Wrapper `8.14`，命令用 `.\gradlew.bat`；插件线 `org.jetbrains.intellij 1.17.4`；`version` 唯一定义在 `build.gradle.kts` 的 `version = "x.y.z"`。
@@ -24,12 +28,14 @@
 ## 1. 发版步骤总览
 
 1. 提升版本号（`build.gradle.kts`）
-2. 在 `src/main/resources/META-INF/plugin.xml` 的 `<change-notes>` 顶部追加本次版本条目（中英双语）
+2. 在 `src/main/resources/META-INF/plugin.xml` 的 `<change-notes>` **最顶部**插入本次版本条目（中英双语）——
+   ⚠️ IDE 与 Marketplace **只显示最上面一条**，插错位置等于没有更新说明
 3. `.\gradlew.bat buildPlugin` → 产出 `build/distributions/deepseek-harness-idea-<ver>.zip`
-4. 校验产物（版本、描述符合法性）
-5. 提交并推送 GitHub
-6. 创建 GitHub Release 并上传资产
+4. 校验产物（版本、描述符合法性；见 §2）
+5. **先**提交并推送 GitHub（`main` 必须先到目标提交，见 §3.3 警告）
+6. **再**创建 GitHub Release 并上传资产（tag 会在此时创建并指向 main HEAD）
 7. 上传 JetBrains Marketplace
+8. 发布后用 `scripts/secret-audit.mjs` 自检凭据；把发布记录写回 `docs/README.md` / `docs/PROJECT_NOTES.md`
 
 ---
 
@@ -77,7 +83,35 @@ git push "https://x-access-token:$pat@github.com/tieJiangW/deepseek-harness-idea
   `remote: Bypassed rule violations for refs/heads/main` —— 属正常，非报错。
 - 若无 TTY，`git push origin main` 会因凭据对话框取消而失败（`could not read Username`），必须用上面的内嵌 URL 形式。
 
+#### 3.2.1 ⚠️ 本地与远端"分叉"（rebase 双胞胎，v0.2.4 实测）
+
+症状：`git log --oneline origin/main..HEAD` 显示**一大堆"待推送"提交**，但
+`git diff HEAD origin/main` 却是**空的**（内容完全一致）——说明本地与远端是**同一批提交的不同哈希**
+（历史上被 rebase 过）。
+
+处理（以远端为基，只提交本次改动，避免推重复提交）：
+
+```powershell
+# 1) 先用 API 看远端真实 HEAD（本地 origin/* 引用可能过期，别只看它）
+#    GET https://api.github.com/repos/{o}/{r}/commits/main
+# 2) 对齐历史但保留工作区改动
+git reset --mixed origin/main
+# 3) 只提交本次的改动
+git add -A && git commit -F .tmp-commitmsg.txt
+```
+
+- ⚠️ `git ls-remote` 在本机不稳定（输出编码 + 凭据），**判断远端状态优先用 API**。
+- ⚠️ 即使远端已包含等价提交，**也要先确认 diff 为空**再 reset，否则会丢失远端内容。
+
 ### 3.3 创建 Release（REST API）
+
+> ⚠️ **顺序要求**：Release API 在 tag 不存在时会**自动创建 tag 并指向"默认分支当前 HEAD"**。
+> 因此必须**先推送 `main`、再创建 Release**；反过来会让远端 `vX.Y.Z` 指向**旧的 main**（缺少本次改动）。
+> 若已产生漂移（`GET /git/ref/tags/vX.Y.Z` 看到的 sha 不是本次提交），修正方式：
+> ```powershell
+> git push "https://x-access-token:$pat@github.com/{o}/{r}.git" refs/tags/vX.Y.Z:refs/tags/vX.Y.Z --force
+> git tag -f vX.Y.Z <本次提交sha>    # 让本地 tag 与远端一致
+> ```
 
 ```
 POST https://api.github.com/repos/{owner}/{repo}/releases
@@ -103,16 +137,23 @@ Body: 文件二进制
 
 - 资产命名须与 `runtime-assets.json` 约定的文件名一致（`runtime-<os>-<arch>.zip` + `.sha256`），否则插件运行时下载 404。
 - 大文件（100MB+）单次可能数分钟，**建议后台任务**逐个上传，避免超时。
-- 本仓库典型资产集：插件 zip + `runtime-win-x64` / `runtime-linux-x64` / `runtime-linux-arm64` / `runtime-macos-arm64` / `runtime-macos-x64` 的 zip 与 `.sha256`。
+- 本仓库典型资产集：插件 zip + `runtime-win-x64` / `runtime-linux-x64` / `runtime-linux-arm64` / `runtime-macos-arm64` / `runtime-macos-x64` 的 zip 与 `.sha256`（共 **11 个**）。
+- **推荐直接用 `scripts/release-v0.2.4.mjs`**（新版本可复制改名）：它按"先删同名资产再上传"实现**幂等**，
+  可反复执行不产生重名；并支持"缺哪个凭据就跳过哪一段"，方便分步验证。v0.2.4 实测 11 个资产全部 `HTTP 201`。
 
-### 3.5 tag 说明
-
-Release API 已自动建远端 tag。如需本地 tag 与远端一致：
+### 3.5 校验：确认远端确实指向本次提交
 
 ```powershell
-git tag v0.2.3
-git push "https://x-access-token:$pat@github.com/tieJiangW/deepseek-harness-idea.git" tag v0.2.3
+# tag 指向（应为本次代码提交，而非旧的 main）
+GET https://api.github.com/repos/{o}/{r}/git/ref/tags/v0.2.4     # → object.sha
+# main HEAD
+GET https://api.github.com/repos/{o}/{r}/commits/main            # → sha / commit.message
+# Release 资产（数量 + state=uploaded + size）
+GET https://api.github.com/repos/{o}/{r}/releases/tags/v0.2.4    # → assets[]
 ```
+
+本仓库 tag 与 main 的正常关系：**tag 指向 `vX.Y.Z` 的代码提交，main 可再往后含若干文档/脚本提交**
+（例如 v0.2.4：`tag v0.2.4 → 0f470cf`，而 `main → 6cc6a56`）。
 
 ---
 
@@ -190,8 +231,14 @@ $form.Dispose(); $client.Dispose()
 | `HttpClient.PatchAsync` | .NET Framework 无此方法 | 用 `SendAsync` + `[System.Net.Http.HttpMethod]::new('PATCH')` |
 | 已发布 Release 正文修正 | 需改 body | `PATCH https://api.github.com/repos/{o}/{r}/releases/{id}`，JSON `{"body": "..."}`（同样走 UTF-8 StringContent） |
 | `git commit -m "多行"` | 引号/换行被 PowerShell 拆坏 | 用 `git commit -F <utf8-message-file>` |
+| `Set-Content -Encoding UTF8`（PS 5.1） | **写入 BOM** → 被 dsh/Node 读取时 JSON 解析失败（`Unexpected token '锘?'`） | 用 `[IO.File]::WriteAllText($p, $s, (New-Object System.Text.UTF8Encoding($false)))` |
+| `Get-Content $f -Raw` 再 `Set-Content` 回写 | 大文件/含中文时**编码被破坏**（内容变乱码，脚本语法直接失效） | 改文件一律用 file 工具或 Node 脚本；确需 PowerShell 时用 `[IO.File]::WriteAllText` + 无 BOM |
+| `git add -A` | 连 `.tmp-*` 消息文件、`.secrets*` 一起提交 | `.gitignore` 加 `.tmp-*` / `.secrets*`；已误提交用 `git rm --cached` + `--amend`（或 `reset --soft` 重提） |
 
 **纯 ASCII 内容不受影响**；仅含中日韩等非 ASCII 时需要上述写法。
+
+> 经验（v0.2.4 实测）：**改文件优先用 file 工具或 Node 脚本**，别用 PowerShell 的 `Get-Content`/`Set-Content` 往返——
+> 本次因此把两处脚本/文档写成乱码并浪费了排查时间。
 
 ---
 
@@ -199,14 +246,20 @@ $form.Dispose(); $client.Dispose()
 
 ```powershell
 # GitHub：Release 与资产
-GET https://api.github.com/repos/tieJiangW/deepseek-harness-idea/releases/tags/v0.2.3
-#   检查 tag_name / assets[].name / assets[].size / body 中文是否正常
+GET https://api.github.com/repos/tieJiangW/deepseek-harness-idea/releases/tags/{tag}
+#   检查 tag_name / assets[].name / assets[].state=uploaded / assets[].size / body 中英双语是否正常
 
 # GitHub：main 是否在目标提交
 GET https://api.github.com/repos/tieJiangW/deepseek-harness-idea/commits/main
 
+# GitHub：tag 指向哪个提交（防止指向旧的 main）
+GET https://api.github.com/repos/tieJiangW/deepseek-harness-idea/git/ref/tags/{tag}   # → object.sha
+
 # 产物：确认版本与描述符
-#   解出 jar 内 META-INF/plugin.xml，校验 <version> 与根子元素合法
+#   解出 jar 内 META-INF/plugin.xml，校验 <version>、idea-version 与 change-notes 首条是否为本次版本
+
+# 凭据：确认没有泄漏
+node scripts/secret-audit.mjs
 ```
 
 - Marketplace 上传成功以 **HTTP 201** 且返回 `id`（update id）为准；`approve:false` 属正常待审。
@@ -217,6 +270,13 @@ GET https://api.github.com/repos/tieJiangW/deepseek-harness-idea/commits/main
 ## 7. 已知注意事项
 
 - **`release-assets/` 已在 `.gitignore`**：存放跨平台 runtime zip（体积大），只作为 GitHub Release 的资产来源，**不入库**。
+- **v0.2.4 实操记录**：`main` 与 tag 常规推送（首轮 `github.com:443` 可用，之后同一会话内转为超时，API 不受影响）；
+  GitHub Release `v0.2.4`（id 391244240，11 资产）+ Marketplace update **1174317**（`approve=false` 待审）。
+  本次新踩到的四个坑（**务必看 `PROJECT_NOTES.md`「发布踩坑」**）：
+  ① 本地/远端历史是 rebase 双胞胎 → 先 `reset --mixed origin/main` 再提交（§3.2.1）；
+  ② Release 建 tag 指向 main HEAD → **必须先 push 再建 Release**（§3.3）；
+  ③ `git add -A` 会连 `.tmp-*` 消息文件一起提交 → 靠 `.gitignore` + `amend` 兜（§5）；
+  ④ `<change-notes>` 顺序决定"更新说明"显示哪条 → 新版本必须插到**最前**（§1 步骤 2）。
 - **v0.2.3 实操记录**：本机 `github.com:443` 不通，代码推送 / tag / Release / 资产上传**全程走 REST API**（见 §8）；
   其中 `macos-x64`、`linux-arm64` 两个资产 CI 不产出，由本地交叉构建后手动上传（见 `release-runtime.md` §3.1）；
   Marketplace 上传成功（update 1171727）后 `approve=false` 属正常待审状态。

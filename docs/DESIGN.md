@@ -27,6 +27,11 @@
 - `dsh-client-connection/lib/index.js`：`/api` 浏览器信任围栏，loopback hostname 默认受信任；`--host 0.0.0.0` 被拒绝
 - `dsh-mcp-client/lib/index.js:738-756`：mcp-client Config schema（`transport: streamable-http` 分支）
 - 凭据文件（插件以 `DEEPSEEK_API_KEY` 为键管理）；profiles/web/：profile 结构（`cordis.yml` = bundle 层 + `cordis.patch.yml` 用户层 + `--patch` 覆盖层；`package.json` 的 `dsh.profile.bundles` 声明 bundle）
+- 配置文档与引用解析（v0.2.4 依赖）：`dsh-settings-file` / `dsh-credentials-local` 的 `Config{path,dshHome}`、`dsh-agent-presets` 的 `Config{default,roots,includeUserRoot}`、`dsh-skill-filesystem` 的 `dshHome`（见 §4.5）；`dsh-client-ui-conversation/lib/client.js:12167-12201` 的 `TEXT_REF_RE` / `FOLDER_REF_RE`（引用 chip 规则，见 §3.7.3）
+
+> ⚠️ **`tooling/runtime-dev` 的 dsh 版本必须与 `DshHomeManager.DSH_VERSION` 一致**，否则真实 dsh 冒烟会以**旧契约**失败
+> （v0.2.4 曾因该目录停留在 0.1.1-rc.2 导致 2 个 workspace 冒烟长期失败）。升级 dsh 时用
+> `build/runtime-<host>.zip` 重建该目录；旧树可留 `{node,dsh}-<oldver>-backup` 备查。
 
 ## 2. 总体架构
 

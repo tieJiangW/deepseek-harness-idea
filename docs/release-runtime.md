@@ -109,6 +109,17 @@ Linux 的原生依赖变体带 libc 后缀：`node-addon-require-builtin-linux-x
 4. **手动上传瘦身插件 zip 到 JetBrains Marketplace**（单版本单 zip；跨平台）。
 5. 校验：各平台 IDE 安装后首次打开工具窗应出现「下载运行时」；之后复用本地运行时不再下载。
 
+### 5.1 v0.2.4 实测状态（可作下一步基线）
+
+- **五平台资产齐备并已发布**：GitHub Release `v0.2.4`（id 391244240）共 11 个资产（插件 zip + 5 平台运行时
+  及 `.sha256`），全部 `state=uploaded`。
+- **`macos-arm64` 已由用户端到端实测通过**（安装 → 启动 dsh → 对话 → MCP 工具链）；`macos-x64`、
+  `linux-arm64` 仍由本地交叉构建后手动上传（CI 无对应 runner）。
+- **给测试者发包建议**：① 通用瘦身插件 zip（首启自动下载运行时）；或 ② 目标平台 **fat 包**
+  （用 `scripts/build-mac-fat.ps1` 注入对应 `runtime-<os>-<arch>.zip`，离线可用）；或 ③ 只发现用插件 +
+  单独发 `runtime-macos-arm64.zip`，让对方在设置页「Choose local runtime zip…」离线导入。
+- **macOS 上的可执行位**由 `RuntimeArchive.unzip` 兜底（见 `PROJECT_NOTES.md`「macOS 适配与 fat 包构造」）。
+
 ## 6. 运行时配置：下载源 vs 本地运行目录（离线说明）
 
 运行时目标位置由 `DshHomeManager.runtimeRoot()` 决定，**优先级**：
