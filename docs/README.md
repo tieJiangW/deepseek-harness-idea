@@ -2,7 +2,7 @@
 
 本仓库开发一个 IntelliJ IDEA 插件（类 Qoder）：在 IDE 内嵌入 DeepSeek Harness（DSH）Web UI，让智能体能读写当前项目文件、通过 MCP 调用 IDE 能力，并提供代码上下文发送与 diff 审查/还原等原生集成。
 
-## 当前状态摘要（v0.2.4，2026-09-17）
+## 当前状态摘要（v0.2.4，2026-09-18）
 
 > **交接先看这一节**；实测细节见 [PROJECT_NOTES.md](./PROJECT_NOTES.md)，运行时细节见 [release-runtime.md](./release-runtime.md)，
 > 发布操作见 [RELEASE_PROCESS.md](./RELEASE_PROCESS.md)。
@@ -11,7 +11,7 @@
 - **内置运行时**：`@deepseek-ai/dsh@0.1.5-rc.2` + Node.js 22.23.2（唯一版本来源 `DshHomeManager.DSH_VERSION`）
 - **IDE 兼容**：`since-build=241` / `until-build=262.*`；已在 **2024.1.7（默认，含全部测试）/ 2024.3.2 / 2026.2**
   分别通过 `compileKotlin` + `compileTestKotlin`
-- **测试**：全部通过（191 项，含 4 个真实 dsh 冒烟：启动与端口 / workspace 注册与置顶 / MCP 工具链 / session 迁移）
+- **测试**：全部通过（194 项，含 4 个真实 dsh 冒烟：启动与端口 / workspace 注册与置顶 / MCP 工具链 / session 迁移）
 - **v0.2.4 主题：dsh 配置共享化（修复"新模型/API Key/预设重启后消失"）**——
   ① 删除 `copyGlobalConfigTo`（启动时用共享副本**覆盖**项目配置，是配置丢失的根因）；
   ② 修正 `ide.yml` 的 patch 语法为 `- id: settings` / `- id: credentials` / `- id: agent-presets` /
@@ -26,6 +26,10 @@
   结果语义 `injected/submitted/blocked/notfound/failed`（仅后两者降级剪贴板+通知）。**已在真实 dsh 0.1.5 页面
   用 headless Chromium + CDP 实测通过**（insertText 生效、回读命中、Enter 501ms 内提交）
 - **平台**：Windows x64、macOS（arm64 / x64）、Linux（x64 / arm64）五平台运行时资产
+- **发布状态（v0.2.4，2026-09-18）**：GitHub Release
+  [`v0.2.4`](https://github.com/tieJiangW/deepseek-harness-idea/releases/tag/v0.2.4)（id 391244240，**11 个资产**：
+  插件 zip + 5 平台运行时及 `.sha256`）；JetBrains Marketplace update **1174317**（`approve=false` 待审）
+- **macOS 验证**：插件已在 **macOS（Apple Silicon）** 由用户完成端到端实测（安装、启动、对话、MCP 工具链）
 - **⚠️ 已知限制（优先级最高）**：dsh 0.1.5 将 composer 由 `<textarea>` 改为 **Lexical contenteditable**，
   因此「发送选中代码」与「DSH 一键解释」目前**降级为剪贴板**（有通知）。适配需改写 JS 注入并**在真实 JCEF 页面验证**。
 - **⚠️ 本机环境注意**：`github.com:443` 不通（`api.github.com`、`uploads.github.com`、`plugins.jetbrains.com` 可达）；
@@ -56,6 +60,7 @@
 
 | 日期 | 版本 | 变更内容 |
 |---|---|---|
+| 2026-09-18 | v0.2.4 发布 | **v0.2.4 已发布**：GitHub Release [`v0.2.4`](https://github.com/tieJiangW/deepseek-harness-idea/releases/tag/v0.2.4)（id 391244240，11 个资产：插件 zip + win-x64 / macos-arm64 / macos-x64 / linux-x64 / linux-arm64 运行时及 `.sha256`）；JetBrains Marketplace update **1174317**（`approve=false` 待审）。**macOS（Apple Silicon）端到端实测通过**（用户验证）。发布前完成凭据自检（`scripts/secret-audit.mjs`）：仓库 91 个文本文件 / 24 条提交信息 / Release 正文 / 本地工作区均无凭据。 |
 | 2026-02-11 | v0.1 | 初稿：基于已确认的产品与技术决策生成 PRD 与 DESIGN（Step 0） |
 | 2026-08-19 | v0.2 | Step 2 运行时自举实现：DshHomeManager/DshProcessManager/PortParser、JCEF 工具窗口、凭据同步、build-runtime.ps1 + buildRuntime 任务、冒烟测试（含真实 dsh web 启动） |
 | 2026-08-19 | v0.3 | Step 3 MCP 桥接实现：IdeBridgeServer、mcp-ide-server.mjs（6 个 ide_* 工具）、McpPatchGenerator、DshBridgeManager、DSH_HOME 顶层 node_modules junction、MCP 冒烟测试；spike 实测 patch `insert:` 语法与 failOnStartupError 严格验证 |
@@ -108,4 +113,4 @@
 | v0.1.3-dev | 切换项目工作区根治（每项目独立 DSH_HOME）+ dsh 0.1.1-rc.2 升级回归 + 运行日志一键解释 + 旧 session/投影缓存升级迁移 + API Key 脱敏回显与 Web UI 全局生效 | ✅ 完成（90/90 测试） |
 | v0.2.1 | 运行时供给 UX + 下载可靠性（thin 构建首启按平台下载运行时 + SHA-256 校验、工具窗口进度条/取消、设置页下载 URL/超时/本地 zip 导入、错误卡片；详见变更记录） | ✅ 完成（122 项测试全部通过） |
 | v0.2.3 | dsh 0.1.5-rc.2 升级与集成适配 + 五平台运行时（新增 macOS x64 / Linux arm64）+ 设置页与文件选择器修复；已发布 GitHub Release v0.2.3 与 JetBrains Marketplace（update 1171727，待审） | ✅ 完成（130 项测试通过） |
-| v0.2.4 | **dsh 配置共享化**（修复新模型/API Key/Agent 预设重启后消失）+ MCP 脚本零链接 + 一次性配置迁移 + `tooling/runtime-dev` 对齐 0.1.5-rc.2 + **修复"发送选中代码 / 日志一键解释 没反应"**（Lexical composer 注入，真实页面 CDP 实测） | ✅ 完成（**191 项测试全部通过**） |
+| v0.2.4 | **dsh 配置共享化**（修复新模型/API Key/Agent 预设重启后消失）+ MCP 脚本零链接 + 一次性配置迁移 + `tooling/runtime-dev` 对齐 0.1.5-rc.2 + **修复"发送选中代码 / 日志一键解释 没反应"**（Lexical composer 注入，真实页面 CDP 实测）；已发布 GitHub Release v0.2.4（11 资产）与 JetBrains Marketplace（update 1174317，待审）；**macOS（Apple Silicon）实测通过** | ✅ 完成（**194 项测试全部通过**） |

@@ -2,8 +2,10 @@
 
 > 本文汇总 DeepSeek Harness IDEA 插件开发过程中的**实测环境事实、踩坑记录、dsh 行为结论**，
 > 供后续任务（Step 6 评审及之后的维护/升级）直接参考，避免重复调查。
-> 最后更新：2026-09-17（**v0.2.4 配置共享化 + 注入修复**，插件版本 **0.2.4**：
-> ① 删除 `copyGlobalConfigTo`（启动覆盖项目配置 = 新模型/语言丢失根因）；patch 改
+> 最后更新：2026-09-18（**v0.2.4 已发布**，插件版本 **0.2.4**：GitHub Release `v0.2.4`（id 391244240，11 资产）
+> + JetBrains Marketplace update **1174317**（待审）+ **macOS（Apple Silicon）端到端实测通过**。
+> 发布前凭据自检通过：`scripts/secret-audit.mjs` 扫描仓库 91 个文本文件 / 24 条提交信息 / Release 正文 / 本地工作区，均无凭据。
+> 背景：① 删除 `copyGlobalConfigTo`（启动覆盖项目配置 = 新模型/语言丢失根因）；patch 改
 > `- id: settings/credentials/agent-presets/skill-filesystem`（旧的 `$settings` 形态被 dsh 拒绝）；
 > ② MCP 脚本全局唯一、落在 dsh 树内（Node ESM **不越过 junction**），删除每项目 `node_modules` junction；
 > ③ 一次性配置迁移（文本级 namespace / refs+records 合并 + `migrated/` 备份）；
