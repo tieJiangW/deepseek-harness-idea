@@ -65,6 +65,8 @@ class DshPluginsConfigurable : SearchableConfigurable {
     private var refreshButton: JButton? = null
     private var cancelButton: JButton? = null
 
+    private val LOG = com.intellij.openapi.diagnostic.Logger.getInstance(DshPluginsConfigurable::class.java)
+
     /** 当前选中的项目根路径（空串 = 没有打开的项目，落到 `default` DSH_HOME）。 */
     private var selectedProjectPath: String = ""
 
@@ -392,53 +394,88 @@ class DshPluginsConfigurable : SearchableConfigurable {
 
     private fun homeManager(): DshHomeManager = DshHomeManager.getInstance()
 
-    /** 后台刷新：确保 profile 目录就绪（**轻量路径**，见 [DshHomeManager.ensureProfileHome]）后读 manifest。 */
+    /**
+     * 读 profile 并渲染。
+     *
+     * **在 EDT 上直接读**（不再丢给后台线程池）：这几个调用在用户的真实 DSH_HOME 上实测全部是
+     * 毫秒级（junction 上 `toRealPath` 2ms、`readString` 1ms、`createDirectories` 1ms），而放进
+     * `executeOnPooledThread` 后曾在用户机器上出现"界面一直读秒、后台任务毫无动静"——任务既不返回
+     * 也不报错，界面上无从判断，日志里也没有任何痕迹（v0.2.5 用户实测两次）。
+     * 读路径本来就不该有不确定的等待，所以这里改成同步读；**只有需要修复**（profile 还没就绪：
+     * 首次启用共享、链接缺失等）时才转后台，并且带锁超时，失败可重试。
+     */
     private fun refreshAsync() {
-        val seq = refreshSeq.incrementAndGet()
-        setBusy(true, DshBundle.message("plugins.phase.preparing"))
-        // 兜底：万一这一步仍然慢（首次迁移/磁盘抖动），5 秒后换成"仍在读取"的**中性**文案。
-        // 旧版这里会显示"pnpm 可能静默…可取消"，但读取 profile 既没有子进程也没有取消按钮 —— 纯误导。
-        slowHintTimer?.stop()
-        slowHintTimer = Timer(5000) {
-            if (operationRunning && refreshSeq.get() == seq) {
-                setStatus(DshBundle.message("plugins.phase.preparingSlow"), neutralColor())
-            }
-        }.apply { isRepeats = false; start() }
+        ApplicationManager.getApplication().invokeLater {
+            val seq = refreshSeq.incrementAndGet()
+            val startedAt = System.currentTimeMillis()
+            val home = homeManager().homeDir(selectedProjectPath)
+            val web = home.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME)
+            val manifestFile = web.resolve(DshProfileManifest.FILE_NAME)
+            val state = runCatching { homeManager().profilesState(selectedProjectPath) }.getOrNull()
+            val text = runCatching {
+                if (java.nio.file.Files.isRegularFile(manifestFile)) {
+                    java.nio.file.Files.readString(manifestFile, java.nio.charset.StandardCharsets.UTF_8)
+                } else {
+                    null
+                }
+            }.getOrNull()
+            LOG.info(
+                "refresh($selectedProjectPath): read=${System.currentTimeMillis() - startedAt}ms " +
+                    "manifest=${text != null} shared=${state?.shared} reason=${state?.reason}",
+            )
 
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val result = runCatching {
-                val home = homeManager().ensureProfileHome(selectedProjectPath)
-                val state = homeManager().profilesState(selectedProjectPath)
-                val profile = DshProfileManifest.parse(
-                    runCatching {
-                        java.nio.file.Files.readString(
-                            home.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME)
-                                .resolve(DshProfileManifest.FILE_NAME),
-                            java.nio.charset.StandardCharsets.UTF_8,
-                        )
-                    }.getOrNull(),
-                )
-                Triple(home, state, profile)
+            if (text == null) {
+                // profile 还没就绪（首次启用共享 / 链接缺失）：后台修复一次再重读
+                setBusy(true, DshBundle.message("plugins.phase.preparing"))
+                slowHintTimer?.stop()
+                slowHintTimer = Timer(5000) {
+                    if (operationRunning && refreshSeq.get() == seq) {
+                        phaseText = DshBundle.message("plugins.phase.preparingSlow")
+                    }
+                }.apply { isRepeats = false; start() }
+                repairProfileAsync(seq)
+                return@invokeLater
             }
+
+            setBusy(false)
+            render(home, state, DshProfileManifest.parse(text))
+        }
+    }
+
+    /** 后台修复 profile 目录（首次启用共享 / 链接缺失），成功后重新读一次。 */
+    private fun repairProfileAsync(seq: Long) {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val startedAt = System.currentTimeMillis()
+            val home = runCatching { homeManager().ensureProfileHome(selectedProjectPath) }.getOrNull()
+            LOG.info("repair($selectedProjectPath): ${System.currentTimeMillis() - startedAt}ms ready=${home != null}")
             ApplicationManager.getApplication().invokeLater {
-                if (refreshSeq.get() != seq) return@invokeLater // 已有更新的一次刷新，丢弃本次结果
+                if (refreshSeq.get() != seq) return@invokeLater
                 slowHintTimer?.stop()
                 slowHintTimer = null
                 setBusy(false)
-                result.onSuccess { (home, state, profile) ->
-                    val dir = home.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME)
-                    profilePathLabel?.text = DshBundle.message("plugins.profilePath", dir.toString())
-                    shareLabel?.text = shareText(state)
-                    tableModel?.setEntries(profile.entries())
-                    setStatus(
-                        DshBundle.message("plugins.status.loaded", profile.plugins.size, profile.dependencies.size),
-                        neutralColor(),
-                    )
-                }.onFailure { e ->
-                    setStatus(DshBundle.message("plugins.error.generic", e.message ?: e.toString()), errorColor())
+                if (home == null) {
+                    setStatus(DshBundle.message("plugins.error.repairFailed"), errorColor())
+                    return@invokeLater
                 }
+                refreshAsync() // 重读（此时一定能读到 manifest）
             }
         }
+    }
+
+    /** 渲染 profile 视图（EDT）。 */
+    private fun render(
+        home: Path,
+        state: DshHomeManager.ProfilesState?,
+        profile: DshProfileManifest.Profile,
+    ) {
+        val dir = home.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME)
+        profilePathLabel?.text = DshBundle.message("plugins.profilePath", dir.toString())
+        shareLabel?.text = state?.let { shareText(it) } ?: DshBundle.message("plugins.share.unknown")
+        tableModel?.setEntries(profile.entries())
+        setStatus(
+            DshBundle.message("plugins.status.loaded", profile.plugins.size, profile.dependencies.size),
+            neutralColor(),
+        )
     }
 
     private fun shareText(state: DshHomeManager.ProfilesState): String =
@@ -505,8 +542,16 @@ class DshPluginsConfigurable : SearchableConfigurable {
         ApplicationManager.getApplication().executeOnPooledThread {
             fun post(block: () -> Unit) = ApplicationManager.getApplication().invokeLater(block)
             val outcome = runCatching {
-                // 只确保 profile 目录/链接就绪（轻量）；重量级初始化留给 dsh 启动时的 ensureHome
+                // 只确保 profile 目录/链接就绪（轻量）；重量级初始化留给 dsh 启动时的 ensureHome。
+                // null = 锁超时（另一条路径正忙），此时**不能**继续：否则 installer 会 `createDirectories`
+                // 出一个项目独立 profile，悄悄绕过共享。
                 val home = homeManager().ensureProfileHome(selectedProjectPath)
+                    ?: return@runCatching DshPluginInstaller.Outcome(
+                        ok = false,
+                        output = "",
+                        failure = DshPluginInstaller.Failure.PROFILE_BUSY,
+                        detail = "profile is being initialized by another operation",
+                    )
                 DshPluginInstaller.run(
                     projectHome = home,
                     sharedRoot = homeManager().sharedConfigRoot(),
@@ -588,6 +633,7 @@ class DshPluginsConfigurable : SearchableConfigurable {
             DshPluginInstaller.Failure.NO_RUNTIME -> DshBundle.message("plugins.error.noRuntime")
             DshPluginInstaller.Failure.PNPM_SETUP_FAILED -> DshBundle.message("plugins.error.pnpmSetup")
             DshPluginInstaller.Failure.TIMEOUT -> DshBundle.message("plugins.error.timeout")
+            DshPluginInstaller.Failure.PROFILE_BUSY -> DshBundle.message("plugins.error.profileBusy")
             DshPluginInstaller.Failure.CANCELLED -> DshBundle.message("plugins.error.cancelled")
             DshPluginInstaller.Failure.COMMAND_FAILED -> DshBundle.message("plugins.error.command")
             DshPluginInstaller.Failure.ERROR, null -> DshBundle.message("plugins.error.generic", outcome.detail ?: "")

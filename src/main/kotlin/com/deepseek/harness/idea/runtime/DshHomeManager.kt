@@ -14,7 +14,6 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 
 /**
  * DSH 运行时与 DSH_HOME 管理（应用级服务）。
@@ -398,7 +397,12 @@ class DshHomeManager : Disposable {
 
         // 每项目 DSH_HOME（数据面）+ profiles 共享链接 + profile 骨架（轻量、加锁、可重入）
         val afterMigration = System.currentTimeMillis()
-        val home = ensureProfileHome(projectPath)
+        val home = ensureProfileHome(projectPath) ?: homeDir(projectPath).also {
+            // 锁超时：不阻断启动（dsh 用项目独立 profile 也能起来），只记日志。
+            // 下一次启动/刷新会重试。
+            LOG.warn("ensureHome($projectPath): profile lock busy; starting with a project-local profile this time")
+            Files.createDirectories(it)
+        }
         val afterProfiles = System.currentTimeMillis()
 
         writeIfAbsent(home.resolve(IDE_PATCH_FILE), "[]\n")
@@ -435,19 +439,35 @@ class DshHomeManager : Disposable {
      * 把这些重量级步骤挂上去会让它们偶发地长时间无响应（v0.2.5 用户实测：点「刷新」后一直停在
      * "Reading the profile…"）。那些步骤会在 dsh 启动时由 [ensureHome] 正常完成。
      *
-     * 加锁：并发刷新/安装同时进来时避免两个 `mklink` 抢同一个链接（后者会因"已存在"失败并被误判）。
-     * 锁可重入，[ensureHome] 同线程再调一次不会自锁。
+     * **锁有超时**（默认 10s）：`withLock` 无超时会无限等，一旦另一条路径（如并发的启动初始化）
+     * 慢或被卡住，调用方就会静默地永远等下去 —— 这在用户侧表现为"界面一直读秒、什么也不发生"。
+     * 拿不到锁时返回 `null`，让调用方给出可重试的明确提示，而不是假装成功。
+     *
+     * @return 项目 DSH_HOME；锁超时/未就绪返回 `null`。
      */
-    fun ensureProfileHome(projectPath: String): Path = profileHomeLock.withLock {
+    fun ensureProfileHome(projectPath: String, lockTimeoutSeconds: Long = 10): Path? {
         val home = homeDir(projectPath)
-        Files.createDirectories(home)
-        ensureProfiles(home, projectPath)
-        val web = home.resolve("profiles/web")
-        Files.createDirectories(web)
-        writeIfAbsent(web.resolve("package.json"), WEB_PROFILE_MANIFEST)
-        writeIfAbsent(web.resolve("cordis.yml"), "[]\n")
-        writeIfAbsent(web.resolve("cordis.patch.yml"), "# 本层由插件通过 --patch 覆盖，不在此修改\n[]\n")
-        home
+        val startedAt = System.currentTimeMillis()
+        if (!profileHomeLock.tryLock(lockTimeoutSeconds, TimeUnit.SECONDS)) {
+            LOG.warn("ensureProfileHome($projectPath): profile lock busy after ${lockTimeoutSeconds}s; giving up")
+            return null
+        }
+        try {
+            Files.createDirectories(home)
+            ensureProfiles(home, projectPath)
+            val web = home.resolve("profiles/web")
+            Files.createDirectories(web)
+            writeIfAbsent(web.resolve("package.json"), WEB_PROFILE_MANIFEST)
+            writeIfAbsent(web.resolve("cordis.yml"), "[]\n")
+            writeIfAbsent(web.resolve("cordis.patch.yml"), "# 本层由插件通过 --patch 覆盖，不在此修改\n[]\n")
+            LOG.info(
+                "ensureProfileHome($projectPath): ${System.currentTimeMillis() - startedAt}ms " +
+                    "shared=${profilesState(projectPath).shared}",
+            )
+            return home
+        } finally {
+            profileHomeLock.unlock()
+        }
     }
 
     /**
@@ -584,9 +604,17 @@ class DshHomeManager : Disposable {
                 .redirectErrorStream(true)
                 .start()
             val done = process.waitFor(15, TimeUnit.SECONDS)
+            if (!done) {
+                // **先杀进程再读输出**：`mklink` 若卡住不退出，其 stdout 不会 EOF，先 `readText()`
+                // 会让本线程**永久阻塞**（并一直持有 profile 锁 → 之后每次刷新/安装都无声无息地卡死）。
+                // 进程已退出后流必然 EOF，读它才是安全的。
+                runCatching { process.destroyForcibly() }
+                runCatching { process.waitFor(5, TimeUnit.SECONDS) }
+                runCatching { process.inputStream.close() }
+                throw IOException("mklink /J timed out after 15s ($link -> $target)")
+            }
             val out = runCatching { process.inputStream.bufferedReader().readText().trim() }.getOrDefault("")
-            if (!done) runCatching { process.destroyForcibly() }
-            if (!done || !Files.exists(link, LinkOption.NOFOLLOW_LINKS)) {
+            if (!Files.exists(link, LinkOption.NOFOLLOW_LINKS)) {
                 throw IOException("mklink /J failed ($link -> $target): $out")
             }
             LOG.info("linked the project profiles to the shared root (junction): $link -> $target")

@@ -72,6 +72,9 @@ internal object DshPluginInstaller {
         /** 超时被杀。 */
         TIMEOUT,
 
+        /** profile 正在被另一条路径初始化（锁超时）；不重试就会静默变成项目独立 profile。 */
+        PROFILE_BUSY,
+
         /** 用户取消。 */
         CANCELLED,
 

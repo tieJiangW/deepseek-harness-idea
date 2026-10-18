@@ -182,6 +182,21 @@ src/main/resources/
    顺便证实**迁移 187MB / 25388 文件的 profiles 实测只要 ~100ms**（同卷 rename），不是瓶颈。
 5. `ensureProfileHome` / `ensureHome` 共用一把可重入锁：并发刷新/安装时避免两个 `mklink` 抢同一链接。
 
+**第二轮：修完上面那条后用户仍反馈"点刷新一直读秒"（54s）。诊断链**：
+- 磁盘/日志取证：新构建启动时 `ensureHome(E:/code/my-manus): config=24ms profiles=23ms total=54ms`，
+  之后**刷新没有任何日志**；用 JBR 直接跑探针（`tooling/tmp-probe/Probe.java`）测同一批调用在真实
+  junction 上的耗时：`toRealPath` 2ms、`readString` 1ms、`createDirectories` 1ms、`readAttributes` 19ms ——
+  **文件操作全不是瓶颈** ⇒ 卡在"后台任务/锁"，不是磁盘。
+- 真正的无界阻塞点：`createProfilesLink` 里 `mklink` 超时后**先 `readText()` 再 `destroyForcibly()`**。
+  若 `mklink` 卡住不退出，其 stdout 永不 EOF，`readText()` 让线程**永久阻塞**并一直持有 profile 锁
+  ⇒ 之后每次刷新/安装都无声无息地卡死（且一行日志都没有，因为日志点在锁之后）。
+- 修复（三层）：① `mklink` 超时后**先杀进程再读流**（进程已退出必然 EOF）；② `ensureProfileHome` 的锁改
+  `tryLock(10s)`，超时返回 `null` 并给出可重试提示（安装方向新增 `Failure.PROFILE_BUSY`，绝不静默退化成
+  项目独立 profile）；③ **刷新读路径直接在 EDT 读**（几个毫秒级调用，何必过线程池），只有"profile 尚未就绪"
+  才转后台修复后重读；④ 状态行与日志都带 `refresh(...): read=…ms manifest=… shared=…` 便于自证。
+- 教训：**任何"串行化 + 可能卡住的外部进程"组合都要给等待设上限**；"没有日志"本身就是证据 —— 说明卡在
+  第一个日志点之前，先怀疑锁与外部进程 IO，而不是继续优化文件遍历。
+
 ### v0.2.5 dsh 插件包共享（"装一次、多项目生效"：全链路冒烟实测）
 
 **问题**：dsh 从 `$DSH_HOME/profiles/<name>` 解析 profile（`dsh-app-boot.resolveProfileDir(name, home)` =
