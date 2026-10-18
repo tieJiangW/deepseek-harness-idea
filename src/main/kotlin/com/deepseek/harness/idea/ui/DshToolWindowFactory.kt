@@ -359,6 +359,10 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
                 processManager = manager
                 manager.addListener(this)
                 Disposer.register(this, manager)
+                // v0.2.5：把"重启自己"登记到应用级入口，让「DSH 插件」设置页可以一键重启
+                // （dsh 只在启动时解析 profile，装/卸插件后必须重启才生效）。
+                com.deepseek.harness.idea.runtime.DshHarnessControl.getInstance()
+                    .registerPanel(project.name) { restart() }
                 manager.start()
             } catch (e: Exception) {
                 LOG.error("failed to bootstrap dsh", e)
@@ -396,6 +400,7 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
         browser?.dispose()
         browser = null
         com.deepseek.harness.idea.runtime.DshLifecycleManager.getInstance().unregisterPanel(project.name)
+        com.deepseek.harness.idea.runtime.DshHarnessControl.getInstance().unregisterPanel(project.name)
         com.deepseek.harness.idea.runtime.DshRuntimeRegistry.getInstance().release(project.name)
     }
 

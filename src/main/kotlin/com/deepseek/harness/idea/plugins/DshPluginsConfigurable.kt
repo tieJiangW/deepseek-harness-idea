@@ -64,6 +64,7 @@ class DshPluginsConfigurable : SearchableConfigurable {
     private var removeButton: JButton? = null
     private var refreshButton: JButton? = null
     private var cancelButton: JButton? = null
+    private var restartButton: JButton? = null
 
     private val LOG = com.intellij.openapi.diagnostic.Logger.getInstance(DshPluginsConfigurable::class.java)
 
@@ -213,6 +214,12 @@ class DshPluginsConfigurable : SearchableConfigurable {
             isVisible = false
         }
         cancelButton = cancelBtn
+        // 装/卸成功后才有意义：dsh 只在启动时解析 profile，必须重启才生效（见 DshHarnessControl）
+        val restartBtn = JButton(DshBundle.message("plugins.restartNow")).apply {
+            addActionListener { restartHarness() }
+            isVisible = false
+        }
+        restartButton = restartBtn
         val open = JButton(DshBundle.message("plugins.open")).apply {
             addActionListener {
                 runCatching {
@@ -261,6 +268,7 @@ class DshPluginsConfigurable : SearchableConfigurable {
                 add(removeBtn)
                 add(refreshBtn)
                 add(cancelBtn)
+                add(restartBtn)
                 add(open)
             }, BorderLayout.EAST)
         }
@@ -366,6 +374,8 @@ class DshPluginsConfigurable : SearchableConfigurable {
         progressBar?.isIndeterminate = busy
         cancelButton?.isVisible = busy && cancellable
         cancelButton?.isEnabled = busy && cancellable
+        // 每次操作开始时收起"重启"按钮：上一次成功的提示不应残留到这一次
+        if (busy) restartButton?.isVisible = false
         if (busy) {
             phaseText = phase
             startedAt = System.currentTimeMillis()
@@ -597,6 +607,24 @@ class DshPluginsConfigurable : SearchableConfigurable {
         setStatus(DshBundle.message("plugins.status.cancelling"), neutralColor())
     }
 
+    /**
+     * 一键重启所有已登记的 Harness 实例（[com.deepseek.harness.idea.runtime.DshHarnessControl]）。
+     *
+     * 装/卸 dsh 插件只改 profile，而 dsh 只在**启动时**解析 profile —— 所以必须重启才生效。
+     * 让用户在这一页直接完成，而不是"回工具窗标题栏找那个 Restart 按钮"。
+     */
+    private fun restartHarness() {
+        val control = runCatching { com.deepseek.harness.idea.runtime.DshHarnessControl.getInstance() }.getOrNull()
+        val count = control?.restartAll() ?: 0
+        restartButton?.isVisible = false
+        if (count > 0) {
+            setStatus(DshBundle.message("plugins.restarted", count), okColor())
+            LOG.info("plugins page: restarted $count harness instance(s) after a plugin change")
+        } else {
+            setStatus(DshBundle.message("plugins.done.nextStart"), neutralColor())
+        }
+    }
+
     private fun specErrorText(error: DshProfileManifest.SpecError): String = DshBundle.message(
         when (error) {
             DshProfileManifest.SpecError.EMPTY -> "plugins.error.empty"
@@ -669,16 +697,25 @@ class DshPluginsConfigurable : SearchableConfigurable {
                         if (action == "add") "plugins.done.install" else "plugins.done.remove",
                         spec,
                     )
+                    val harnessRunning = runCatching {
+                        com.deepseek.harness.idea.runtime.DshHarnessControl.getInstance().runningCount() > 0
+                    }.getOrDefault(false)
+                    // dsh 只在启动时解析 profile：运行中 → 给一键重启；未运行 → 下次启动自动生效
+                    val suffix = DshBundle.message(
+                        if (harnessRunning) "plugins.done.needsRestart" else "plugins.done.nextStart",
+                    )
                     appendOutputLine("")
-                    appendOutputLine("✓ " + text + " " + DshBundle.message("plugins.elapsed", elapsed))
-                    setStatus("✓ " + text, okColor())
+                    appendOutputLine("✓ " + text + " " + suffix + " " + DshBundle.message("plugins.elapsed", elapsed))
+                    setStatus("✓ " + text + " " + suffix, okColor())
+                    restartButton?.isVisible = harnessRunning
                     specField?.text = ""
-                    notifyResult(true, text)
+                    notifyResult(true, text + " " + suffix, offerRestart = harnessRunning)
                 } else {
                     val text = failureText(outcome)
                     appendOutputLine("")
                     appendOutputLine("✗ " + text)
                     setStatus("✗ " + text, errorColor())
+                    restartButton?.isVisible = false
                     notifyResult(false, text)
                 }
             }
@@ -689,17 +726,34 @@ class DshPluginsConfigurable : SearchableConfigurable {
      * 结果也走 IDE 通知（用户常常点完「安装」就切去看别的窗口，回来时对话框可能已关）：
      * 成功 = INFORMATION，失败 = ERROR，文案里带"需重启 Harness"。
      */
-    private fun notifyResult(ok: Boolean, text: String) {
+    /**
+     * 结果也走 IDE 通知（用户常常点完「安装」就切去看别的窗口，回来时对话框可能已关）。
+     * 成功时装插件需要重启才生效：通知里带「立即重启」action，用户不必回设置页或工具窗找按钮。
+     */
+    private fun notifyResult(ok: Boolean, text: String, offerRestart: Boolean = false) {
         runCatching {
-            com.intellij.notification.Notifications.Bus.notify(
-                com.intellij.notification.Notification(
-                    "DeepSeek Harness",
-                    DshBundle.message("plugins.displayName"),
-                    text,
-                    if (ok) com.intellij.notification.NotificationType.INFORMATION
-                    else com.intellij.notification.NotificationType.ERROR,
-                ),
+            val notification = com.intellij.notification.Notification(
+                "DeepSeek Harness",
+                DshBundle.message("plugins.displayName"),
+                text,
+                if (ok) com.intellij.notification.NotificationType.INFORMATION
+                else com.intellij.notification.NotificationType.ERROR,
             )
+            if (offerRestart) {
+                notification.addAction(object : com.intellij.openapi.actionSystem.AnAction(
+                    DshBundle.message("plugins.restartNow"),
+                ) {
+                    override fun actionPerformed(e: com.intellij.openapi.actionSystem.AnActionEvent) {
+                        val control = runCatching {
+                            com.deepseek.harness.idea.runtime.DshHarnessControl.getInstance()
+                        }.getOrNull()
+                        val count = control?.restartAll() ?: 0
+                        LOG.info("plugins notification: restarted $count harness instance(s)")
+                        notification.expire()
+                    }
+                })
+            }
+            com.intellij.notification.Notifications.Bus.notify(notification)
         }
     }
 

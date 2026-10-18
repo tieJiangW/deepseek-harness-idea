@@ -140,7 +140,11 @@
             the current phase (checking the runtime → preparing pnpm → installing), streamed pnpm output, a
             "still running" hint when the child is silent, a Cancel button, and an explicit green ✓ / red ✗ result
             (with the time taken) plus an IDE notification — so you always know whether it worked.</li>
-            <li><b>Fixes for this release.</b> Reinstalling after an uninstall no longer fails with
+            <li><b>Fixes for this release.</b> A plugin install now takes effect in one click: dsh parses the profile
+            (including <code>dsh.profile.bundles</code>) only at startup, so the DSH Plugins page shows a
+            <i>Restart harness now</i> button after a successful install/remove and the notification carries the same
+            action (if the harness is not running, the change applies on next start; we never restart it behind your
+            back while an agent task may be running). Reinstalling after an uninstall no longer fails with
             <code>ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF</code>: the profile's <code>node_modules</code> had been
             created by a different pnpm configuration, so the installer now reads
             <code>virtualStoreDirMaxLength</code> from <code>node_modules/.modules.yaml</code> and passes the same value
@@ -169,7 +173,10 @@
             <li><b>安装过程看得见。</b>不定进度条 + 每秒刷新的用时 + 当前阶段（检查运行时 → 准备 pnpm → 正在安装）+
             实时 pnpm 输出 + 长时间无输出时"仍在运行"提示 + 「取消」按钮，结束给出绿色 ✓ / 红色 ✗（含用时）并弹
             IDE 通知 —— 不再无从判断是否装成功。</li>
-            <li><b>本版修复。</b>卸载后重新安装不再报 <code>ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF</code>：profile 的
+            <li><b>本版修复。</b>装完一键生效：dsh 只在启动时解析 profile（含 <code>dsh.profile.bundles</code>），
+            因此装/卸成功后「DSH 插件」页会出现「立即重启 Harness」按钮，IDE 通知也带同一 action
+            （Harness 未运行时提示下次启动生效；**不会**在你可能正跑智能体任务时擅自重启）。
+            卸载后重新安装不再报 <code>ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF</code>：profile 的
             <code>node_modules</code> 曾被另一套 pnpm 配置创建，现在安装/卸载前会读
             <code>node_modules/.modules.yaml</code> 的 <code>virtualStoreDirMaxLength</code> 并把同值传给 pnpm；
             若 pnpm 仍报目录不一致，则把旧目录改名为 <code>node_modules.broken-&lt;时间戳&gt;</code> 并自动重试一次。
@@ -434,6 +441,9 @@
         <applicationService serviceImplementation="com.deepseek.harness.idea.runtime.DshHomeManager"/>
         <applicationService serviceImplementation="com.deepseek.harness.idea.runtime.DshRuntimeRegistry"/>
         <applicationService serviceImplementation="com.deepseek.harness.idea.runtime.DshLifecycleManager"/>
+
+        <!-- v0.2.5：应用级「重启 Harness」入口（dsh 只在启动时解析 profile，装/卸插件后需重启才生效） -->
+        <applicationService serviceImplementation="com.deepseek.harness.idea.runtime.DshHarnessControl"/>
 
         <applicationConfigurable parentId="tools"
                                  instance="com.deepseek.harness.idea.settings.DshSettingsConfigurable"

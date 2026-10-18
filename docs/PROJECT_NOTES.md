@@ -191,6 +191,19 @@ virtual-store-dir-max-length value. Run "pnpm install" to recreate the modules d
 - 若隔离也失败（运行中的 dsh 占用 `node_modules`，Windows 不允许 rename/删除被占用的目录），仍明确报错并保留
   manifest 备份；此时先「重启 Harness」再操作即可。
 
+**第六轮：装完还要手动去点「重启 Harness」（用户反馈）**。这不是 bug，而是 dsh 的固有约束：profile（含
+`dsh.profile.bundles`）只在**启动时**解析，`patchReload: live` 只热重载用户 patch 层、不重载 bundle 列表。
+此前我们只在文案里让用户去工具窗标题栏点重启 —— 很容易漏（装完列表没变，以为没装上）。
+
+修复：新增应用级 `DshHarnessControl`（工具窗面板启动时注册 `restart()` 回调、dispose 时注销；
+解决"设置页拿不到每面板一个的 `DshProcessManager`"）。设置页装/卸成功后：
+
+- 若 `runningCount() > 0` → 状态行出现「立即重启 Harness」按钮；
+- 否则提示「下次启动 Harness 时生效」，不显示无意义的按钮；
+- IDE 成功通知里带 `Restart harness now` action（切走窗口也能一键重启）。
+
+设计取舍：**不自动重启** —— dsh 里可能正在跑长任务，静默杀掉会打断用户；改成"一步完成"，把决定权留给用户。
+
 ### v0.2.5 事故：`cleanLegacySharedRoot` 把共享 profile 根当遗留删掉（自伤，已修）
 
 **症状（用户实测）**：点设置页「刷新」后一直停在 "Reading the profile…"，计时一路涨到 35s+；放开后插件列表
@@ -780,7 +793,7 @@ x64 对应 `*-darwin-x64`）。
 | 集成冒烟 | DshBootstrapSmokeTest(真实 dsh 启动 + workspace 注册断言) / DshMcpBridgeSmokeTest(mock bridge + MCP tools/list 6 工具 + failOnStartupError 严格启动) / WorkspaceInitializerSmokeTest(切换项目工作区顺序) / **LegacySessionMigratorSmokeTest(v0.1.3-dev：zstd session 迁移后 workspace.json 自动挂接)** | 需 `DSH_IDEA_RUNTIME`，否则跳过 |
 
 - 冒烟测试注意：临时 DSH_HOME 内 dsh 自愈 junction 指向 runtime → **tearDown 必须先 unlinkJunctions 再让 `@TempDir` 清理**，否则清空 runtime（见 §4）。
-- 测试计数：**253 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 253 为准**。
+- 测试计数：**260 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 260 为准**。
 
 ---
 
