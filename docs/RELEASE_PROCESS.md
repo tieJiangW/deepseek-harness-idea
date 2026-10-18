@@ -272,6 +272,12 @@ node scripts/secret-audit.mjs
 - **v0.2.5 一键脚本**：`node scripts/release-v0.2.5.mjs`（凭据只从 `GITHUB_PAT` / `MARKETPLACE_TOKEN` 读；
   缺哪项跳过哪段）。它按顺序做：push main → push tag（`--force` 幂等）→ 创建/复用 Release → **PATCH 正文**
   （防 CI 的 `generate_release_notes` 覆盖）→ 上传 11 个资产（同名先删）→ 打印 tag 与 main 指向。
+- **v0.2.5 实操记录**：Marketplace 上传成功 —— **update 1197216**（`version=0.2.5`、`approve=false` 待审、
+  `since=241.0 / until=262.*`、2,055,103 B）。GitHub 侧当时未推送（本地 `395f425` + tag `v0.2.5` 已就绪）。
+  **新踩坑：泄露的凭据会被服务端撤销** —— 会话里旧 GitHub PAT `GET /user` 返回 401，旧 Marketplace token 上传返回
+  `403 Authentication Failed: token is invalid`；两者都必须**重新签发**（旧值无法找回）。
+  排查手法：会话数据是 `session.jsonl.zstd` 的**多帧 append** 格式（每行一个独立 zstd 帧，帧间可能有填充字节），
+  直接用 `zstdDecompressSync` 只解第一帧；需按帧 magic（`0xFD2FB528`）扫描帧边界后逐帧解压才能搜全量文本。
 - **`release-assets/` 已在 `.gitignore`**：存放跨平台 runtime zip（体积大），只作为 GitHub Release 的资产来源，**不入库**。
 - **v0.2.4 实操记录**：`main` 与 tag 常规推送（首轮 `github.com:443` 可用，之后同一会话内转为超时，API 不受影响）；
   GitHub Release `v0.2.4`（id 391244240，11 资产）+ Marketplace update **1174317**（`approve=false` 待审）。

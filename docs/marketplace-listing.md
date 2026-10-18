@@ -2,7 +2,7 @@
 
 > 上传 `build/distributions/deepseek-harness-idea-0.2.5.zip` 时按此填写。
 > Name / Description / Change-notes 会自动从 jar 内 `plugin.xml` 带入；此处为**额外字段**的建议值。
-> 历史：v0.2.3 → update 1171727；v0.2.4 → update 1174317（均 `approve=false` 待审）。
+> 历史：v0.2.3 → update 1171727；v0.2.4 → update 1174317；**v0.2.5 → update 1197216**（2026-10-18 上传，HTTP 201，`approve=false` 待审）。
 
 ## 基本信息
 
