@@ -20,14 +20,15 @@
 | IDE Bridge | 插件内的 Kotlin 本地 HTTP 服务，向 MCP server 暴露 IDE 能力 |
 | MCP | Model Context Protocol；dsh 作为 MCP 客户端连接插件提供的 MCP server |
 
-参考源码（本机 `tooling/runtime-dev` 与 dsh profile 目录中的 `@deepseek-ai/dsh@0.1.5-rc.2`）：
+参考源码（本机 `tooling/runtime-dev` 与 dsh profile 目录中的 `@deepseek-ai/dsh@0.2.1-rc.2`）：
 
-- `dsh-web-app/lib/startup.js`：web 命令行 `--host/--port/--trusted-host`；`--port 0` 由 OS 分配
-- `dsh-web-app/lib/index.js:107`：启动成功打印 `dsh web: http://127.0.0.1:<port>`（loopback）
-- `dsh-client-connection/lib/index.js`：`/api` 浏览器信任围栏，loopback hostname 默认受信任；`--host 0.0.0.0` 被拒绝
-- `dsh-mcp-client/lib/index.js:738-756`：mcp-client Config schema（`transport: streamable-http` 分支）
+- `dsh-web-app/lib/startup.js`：web 命令行 `--host/--port/--trusted-host/--no-open`；`--port 0` 由 OS 分配
+- `dsh-web-app/lib/index.js:162`：启动成功打印 `dsh web: <authenticatedUrl>`（loopback + `?token=`，v0.2.6 复验）
+- `dsh-client-connection/lib/index.js`：`/api` 浏览器信任围栏（loopback 默认受信任）；`authorizeIndex` 对 `GET /?token=` 回 **303 + `Set-Cookie: dsh-auth-…`**（`COOKIE_PREFIX` 同名）
+- `dsh-mcp-client/lib/index.js`：mcp-client Config（`transport: streamable-http` 分支、`serverName`、`toolCallTimeoutMs`、`failOnStartupError`、`reconnect`）——0.2.1 仍支持，未改
 - 凭据文件（插件以 `DEEPSEEK_API_KEY` 为键管理）；profiles/web/：profile 结构（`cordis.yml` = bundle 层 + `cordis.patch.yml` 用户层 + `--patch` 覆盖层；`package.json` 的 `dsh.profile.bundles` 声明 bundle）
-- 配置文档与引用解析（v0.2.4 依赖）：`dsh-settings-file` / `dsh-credentials-local` 的 `Config{path,dshHome}`、`dsh-agent-presets` 的 `Config{default,roots,includeUserRoot}`、`dsh-skill-filesystem` 的 `dshHome`（见 §4.5）；`dsh-client-ui-conversation/lib/client.js:12167-12201` 的 `TEXT_REF_RE` / `FOLDER_REF_RE`（引用 chip 规则，见 §3.7.3）
+- **配置面（dsh 0.2.1 起，v0.2.6 依赖）**：`dsh-config-editor/lib/index.js:24`（`documentPath` = profile 的 `cordis.patch.yml`）、`dsh-settings/lib/index.js:343-370`（`importLegacyDocument` 把 `<DSH_HOME>/settings.yaml` 一次性导入 profile 并改名 `.imported`）、`dsh-credentials-local` 的 `Config{path,dshHome}`（凭据仍可重定向）、`dsh-skill-filesystem` 的 `dshHome`、`dsh-agent-preset-registry/lib/index.js:441`（`Config{default,selectedDefault}`，无 roots）
+- `dsh-client-ui-conversation/lib/client.js:13893-13894` 的 `TEXT_REF_RE` / `FOLDER_REF_RE`（引用 chip 规则，见 §3.7.3；0.2.1 未变）
 
 > ⚠️ **`tooling/runtime-dev` 的 dsh 版本必须与 `DshHomeManager.DSH_VERSION` 一致**，否则真实 dsh 冒烟会以**旧契约**失败
 > （v0.2.4 曾因该目录停留在 0.1.1-rc.2 导致 2 个 workspace 冒烟长期失败）。升级 dsh 时用
@@ -78,9 +79,9 @@
    合并写入共享文件；**不向 dsh 进程注入 `DEEPSEEK_API_KEY` 环境变量**
    （`dsh-credentials-local.resolve()` 为 `inherited env wins`，注入会遮蔽 Web UI 写入并使 `assertUnshadowed`
    拒绝 Web UI 的 set；见 §3.9 与 PROJECT_NOTES §4）。
-4. **Profile 合成**：`profiles/<name>/cordis.yml` 初始为 `[]`，由 bundle 层（`package.json` 的 `dsh.profile.bundles`）+ `cordis.patch.yml` 用户层 + `--patch` 覆盖层合成。插件以 `--patch <ide.yml>` 注入 mcp-client（`insert:`）与四个共享化行（`- id: <rowId>` 整份覆盖，见 §4.5），不污染用户层。
-5. **MCP 客户端**：`@deepseek-ai/dsh-mcp-client` 支持 `transport: streamable-http`；每实例一个 serverName；模型侧工具名为 `mcp__<serverName>__<rawName>`（serverName 须匹配 `^[A-Za-z0-9_-]{1,32}$`）。其依赖 `@modelcontextprotocol/sdk` 存在于 dsh 安装树的 `node_modules`，由插件附带的 MCP server 脚本按 node 向上查找解析——脚本部署在 `<运行时根>/.dsh-ide-bridge/`，因此**无需任何 junction**（v0.2.4）。
-6. **运行时（v0.2.0+ thin 默认）**：固定 `@deepseek-ai/dsh@0.1.5-rc.2` + Node.js 22.x；插件**不打包**约 93MB 的运行时，Windows/macOS/Linux 一律在**首次使用按平台下载**（`runtime-assets.json` 资产地图 → `runtime-<os>-<arch>.zip` + `.sha256`），SHA-256 校验后解压缓存到 `<config>/dsh-idea/runtime/<ver>/`（离线/升级复用；`DSH_IDEA_RUNTIME` 或设置页 runtime-directory 跳过下载；fat 构建 `-Pthin=false` 才内置、免下载）。v0.2.1 起下载走池化 HTTP/2 的 `java.net.http.HttpClient` + 浏览器 UA + 超时/退避重试，带进度/取消（见 §3.2）。
+4. **Profile 合成**：`profiles/<name>/cordis.yml` 初始为 `[]`，由 bundle 层（`package.json` 的 `dsh.profile.bundles`）+ `cordis.patch.yml` 用户层 + `--patch` 覆盖层合成。插件以 `--patch <ide.yml>` 注入 mcp-client（`insert:`）与两个共享化行（`- id: credentials` / `- id: skill-filesystem`，见 §4.5），不污染用户层。
+5. **MCP 客户端**：`@deepseek-ai/dsh-mcp-client` 支持 `transport: streamable-http`；每实例一个 serverName；模型侧工具名为 `mcp__<serverName>__<rawName>`（serverName 须匹配 `^[A-Za-z0-9_-]{1,32}$`）。**0.2.1 起该客户端改用 `@modelcontextprotocol/client@2`，dsh 安装树不再带 `@modelcontextprotocol/sdk`/`express`**（实测三个 import 全 `ERR_MODULE_NOT_FOUND`）→ 这两个包由运行时构建显式装入（v0.2.6，见 §3.2），插件附带的 MCP server 脚本仍按 node 向上查找解析，脚本部署在 `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/`，因此**无需任何 junction**（v0.2.4）。v0.2.6 已实测 v1 SDK 服务端 ↔ 0.2.1 的 v2 客户端协议互通（`failOnStartupError: true` 下握手/工具同步通过）。
+6. **运行时（v0.2.0+ thin 默认）**：固定 `@deepseek-ai/dsh@0.2.1-rc.2` + Node.js 22.x；插件**不打包**约 93MB 的运行时，Windows/macOS/Linux 一律在**首次使用按平台下载**（`runtime-assets.json` 资产地图 → `runtime-<os>-<arch>.zip` + `.sha256`），SHA-256 校验后解压缓存到 `<config>/dsh-idea/runtime/<ver>/`（离线/升级复用；`DSH_IDEA_RUNTIME` 或设置页 runtime-directory 跳过下载；fat 构建 `-Pthin=false` 才内置、免下载）。v0.2.1 起下载走池化 HTTP/2 的 `java.net.http.HttpClient` + 浏览器 UA + 超时/退避重试，带进度/取消（见 §3.2）。
 
 ## 3. 模块设计
 
@@ -124,9 +125,9 @@
 **构建期**（`scripts/build-runtime.mjs`，Gradle task `buildRuntime` 调用；跨平台，可跑在任意主机，默认取当前主机 os/arch 为目标）：
 
 1. 下载 Node.js 22.x（按目标平台选 `win-*.zip` / `darwin-*.tar.gz` / `linux-*.tar.gz`，SHA-256 从同版本官方 `SHASUMS256.txt` 校验）→ 归一化到 `<OutputDir>/node/`（Windows=`node.exe` 顶层；Unix 将 `bin/node` 上移为 `node/node` 并加可执行位）。
-2. 以目标 node 的 npm 安装 `@deepseek-ai/dsh@0.1.5-rc.2` 及其依赖到 `<OutputDir>/dsh/`（`--ignore-scripts`；npm 依 `--os/--cpu` 解析目标平台原生 optionalDependencies，如 sharp/koffi/node-addon-require-builtin）。
-3. 冒烟验证：读取 `dsh` 版本；`--bundle` 时打包 `runtime-<os>-<arch>.zip`（**zip 根直接为 `node/` + `dsh/`**，排除源包与 npm 缓存），并产出同名 `.sha256` 侧车。
-4. 下载/安装均为幂等（存在且校验通过则跳过；`--force` 重建）。
+2. 以目标 node 的 npm 安装 `@deepseek-ai/dsh@0.2.1-rc.2` 及其依赖到 `<OutputDir>/dsh/`（`--ignore-scripts`；npm 依 `--os/--cpu` 解析目标平台原生 optionalDependencies，如 sharp/koffi/node-addon-require-builtin）。**同一份 package.json 还声明 MCP bridge 依赖** `@modelcontextprotocol/sdk`（`^1.30.0`）与 `express`（`^5.2.1`）：dsh 0.2.1 已不再自带它们，而插件的 `mcp-ide-server.mjs` 需要（缺失即 `ERR_MODULE_NOT_FOUND` → 7 个 `ide_*` 工具静默全挂）。
+3. 冒烟验证：读取 `dsh` 版本 + **逐条断言四个 bridge specifier 可从 `<OutputDir>/dsh/node_modules` 解析**（`sdk/server/mcp.js`、`sdk/server/streamableHttp.js`、`sdk/server/express.js`、`zod/v4`），缺失即构建失败；`--bundle` 时打包 `runtime-<os>-<arch>.zip`（**zip 根直接为 `node/` + `dsh/`**，排除源包与 npm 缓存），并产出同名 `.sha256` 侧车。
+4. 下载/安装均为幂等（存在且校验通过则跳过；`--force` 重建）。`--output` / `--cache` 的相对路径按**仓库根**解析成绝对路径（npm 以 `<output>/dsh` 为 cwd，相对 `--cache` 会被解析到该 cwd 下 —— 曾因此让 npm install 失败）。
 
 **打包**：`buildRuntime`（`--bundle`）→ `build/runtime-<os>-<arch>.zip` + `.sha256`。瘦身默认（thin）不把约 93MB 的运行时打进插件 jar；`-Pthin=false` 时 `bundleRuntime` 把当前平台 zip 复制为 `build/plugin-runtime/runtime-bundle.zip` 作为插件资源（fat / 离线备选，装上后免下载）。
 
@@ -255,10 +256,10 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 
 **patch 注入（`ide.yml`）**：
 
-- 由插件生成（`McpPatchGenerator`），内容为 cordis loader patch 条目数组。**实测语法**（dsh 0.1.1-rc.2；**0.1.5-rc.2 冒烟复验仍适用**——strict patch 启动 + 6 工具注册通过）：`--patch` 覆盖层只能修改已有条目或 `insert` 新增；新增 mcp-client 实例须用 `insert` 列表，且 `name` 字段必须显式声明插件包名：
+- 由插件生成（`McpPatchGenerator`），内容为 cordis loader patch 条目数组。**实测语法**（dsh 0.2.1-rc.2 复验：strict patch 启动 + 7 个 `ide_*` 工具注册通过）：`--patch` 覆盖层只能修改已有条目或 `insert` 新增；新增 mcp-client 实例须用 `insert` 列表，且 `name` 字段必须显式声明插件包名；按 id 的覆盖只替换**指定的**字段（`config` 整份替换，`disabled` 等同级字段可单独给出）：
 
 ```yaml
-# ide.yml（McpPatchGenerator 生成，mcpPort 动态填入）
+# ide.yml（McpPatchGenerator 生成，mcpPort / 共享根动态填入）
 - insert:
     - id: mcp.ide
       name: '@deepseek-ai/dsh-mcp-client'
@@ -270,12 +271,26 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
         reconnect:
           enabled: true
           maxAttempts: 3
+- id: credentials
+  config:
+    path: '<共享根>/.credentials.yaml'
+- id: skill-filesystem
+  disabled: false          # dsh 0.2.1 的 web 层把该行置为 disabled:true（预设接管技能发现）
+  config:
+    dshHome: '<共享根>'
 ```
 
+- ⚠️ **dsh 0.2.1 的三处静默失效（v0.2.6 实测，均已适配）**：
+  1. `settings` 行改为 `@deepseek-ai/dsh-settings`（抽象 seam，**无 Config**），0.1.5 的 `dsh-settings-file` 与 `Config{path}` 已移除 → 指向共享 `settings.yaml` 的 `path` 被忽略且不报错；设置真源改为 **profile 的 `cordis.patch.yml`**（见 §4.4），故不再生成该段。
+  2. `agent-presets` 行**已不存在**（改名 `agent-preset-registry`，Config 只有 `default`/`selectedDefault`）→ dsh 只打 warn `patch: entry "agent-presets" not found` 并跳过；Agent 预设改为 profile 内的声明式行，随共享 profile 共享。
+  3. `skill-filesystem` 行在 web 层被 `disabled: true`，只替换 `config` 不解除禁用 → 共享技能不注册；必须显式 `disabled: false`。
 - 模型侧工具名：`mcp__ide__ide_get_selection` 等（raw name 前缀 `mcp__<serverName>__`）。
 - MCP server（`mcp-ide-server.mjs`）**全局部署一份**于
   `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/`，依赖由 `<运行时根>/dsh/node_modules`
   天然向上解析（v0.2.4 起不再建任何 junction，见 §3.6/§4.4）。
+- ⚠️ **dsh 0.2.1 的安装树不再有 `@modelcontextprotocol/sdk` 与 `express`**（改用
+  `@modelcontextprotocol/client@2`，实测三个 import 全部 `ERR_MODULE_NOT_FOUND`）→ 由
+  `scripts/build-runtime.mjs` 的 `BRIDGE_DEPS` 显式装入运行时（见 §3.2），构建期逐条断言可解析。
 - `failOnStartupError: true`（测试/诊断形态）：MCP 连接或工具同步失败即拒绝启动，用于冒烟验证。
 
 ### 3.7 代码上下文发送
@@ -476,6 +491,17 @@ const FOLDER_REF_RE = /(^|\s)(@(?:"[^"\n]*\/|[^\s"]+\/))/g;        // 只认"以
 首次联网、之后离线复用），并生成 shim（Windows `pnpm.cmd` / Unix 带 shebang 的可执行脚本）前置到子进程 PATH。
 不改用户全局环境，也不写运行时树（运行时树可能只读）。
 
+- **同一个 profile 只能有一个 pnpm（v0.2.6 用户实测）**：dsh 0.2.1 起 Web UI 自带插件市场
+  （`ui-plugin-manager` → `@deepseek-ai/dsh-plugin-manager`），它执行的是 `execa("pnpm")`，即
+  **dsh 子进程 PATH 上的 pnpm**；而本页用的是插件私有 pnpm。两者大版本不同时 pnpm 会逐项比对
+  `node_modules/.modules.yaml` 并拒绝操作（实测 9.15.9 建的树被 PATH 上 11.22.0 拒绝：
+  先 `ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF`，钉住该项又报 `ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF`；
+  **只钉单个设置不够**）。修复：`DshProcessManager` 的 `pathPrependDirs` 把
+  `<共享根>/plugin-tools/bin` **前置进 dsh 子进程 PATH**，且 `DshPluginInstaller.syncShimForRuntime`
+  每次启动用**当前运行时**的 node 重写 shim（旧实现 shim 写死 node 绝对路径且被无脑复用，
+  升级 dsh 版本后会指向已删除的旧运行时）。已知限制：`allowBuilds` 是 pnpm 10+ 语义，
+  私有 pnpm 9.15.9 会忽略它（需 postinstall 的插件可能不构建），见 MILESTONE_REVIEW C-7。
+
 - **回滚**：每次操作前把 `package.json` / `pnpm-lock.yaml` / `cordis.patch.yml` / `pnpm-workspace.yaml`
   备份到 `<共享根>/plugin-backups/<yyyyMMdd-HHmmss-SSS>/`；命令非零退出则回写这些文件
   （包体留在 `node_modules` 无害：manifest 未声明就不会被加载）。安装器全程加锁，避免两个 IDE 窗口并发写坏 lockfile。
@@ -633,22 +659,23 @@ stdout   = 逐行读取；含 "dsh web: http://127.0.0.1:<webPort>"
 > 放在后面会被 web 应用当作未知选项拒绝（实测 dsh 0.1.1-rc.2）。
 > `--no-open`：dsh web 默认会把 Web UI 打开到系统默认浏览器；内嵌于 IDE 工具窗，显式禁用（用户要求，v0.1.3-dev）。
 
-### 4.4 运行时与目录布局（共享配置根 + 每项目 DSH_HOME，v0.2.5）
+### 4.4 运行时与目录布局（共享配置根 + 每项目 DSH_HOME，v0.2.5；v0.2.6 按 dsh 0.2.1 分层）
 
 ```
 <PathManager.getConfigDir()>/dsh-idea/
 ├── runtime/<version>/                     # 运行时（v0.2.0+ thin：首次按平台下载+SHA-256 校验；全局共享，不按项目）
 │   ├── node/                              # Node.js 运行时（按平台：node.exe / node，归一化布局；含私有 npm）
-│   ├── dsh/                               # npm 安装的 @deepseek-ai/dsh 树（含全部依赖）
-│   ├── dsh/node_modules/                  #   MCP 脚本依赖的解析落点
+│   ├── dsh/                               # npm 安装的 @deepseek-ai/dsh 树（含全部依赖 + v0.2.6 的 MCP bridge 依赖）
+│   ├── dsh/node_modules/                  #   MCP 脚本依赖的解析落点（含 @modelcontextprotocol/sdk / express / zod）
 │   └── dsh/node_modules/@deepseek-ai/dsh-ide-bridge/mcp-ide-server.mjs  # ★ MCP server 脚本（全局唯一一份；v0.2.4）
 └── dsh-home/                              # ★ 共享配置根（所有项目共享；v0.2.4 起 = DshHomeManager.sharedConfigRoot()）
-    ├── settings.yaml                      #   dsh 设置文档唯一真源（模型 provider/自定义模型、语言、内测声明）
-    ├── .credentials.yaml                  #   dsh 凭据唯一真源（version:1 + refs/records）
-    ├── .agent-presets/                    #   Agent 预设（用户可作者化根）
-    ├── skills/                            #   个人技能（项目技能仍在 <项目>/.dsh/skills）
+    ├── settings.yaml                      #   ⚠️ dsh 0.1.5 的旧设置文档：0.2.1 起只作**一次性导入源**（见下）
+    ├── .credentials.yaml                  #   dsh 凭据唯一真源（version:1 + refs/records；`- id: credentials` 指向）
+    ├── .agent-presets/                    #   ⚠️ 0.2.1 起不再被读取（Agent 预设改为 profile 内声明式行）
+    ├── skills/                            #   个人技能（`- id: skill-filesystem` 的 dshHome/skills；项目技能仍在 <项目>/.dsh/skills）
     ├── profiles/                          # ★ 共享 dsh profile 根（v0.2.5；每项目的 profiles 链接到这里）
-    │   ├── web/                           #   web profile（package.json 的 dsh.profile.bundles = 插件层序）
+    │   ├── web/cordis.patch.yml           #   ★ 0.2.1 起的**配置真源**：设置（模型/语言/onboarding）与 Agent 预设由 dsh-config-editor 写在这里
+    │   ├── web/package.json               #   dsh.profile.bundles = 插件层序
     │   ├── node_modules/                  #   dsh 自愈创建的共享 fallback（bundle 依赖解析落点）
     │   └── web/node_modules/              #   pnpm 安装的插件包（装一次 → 所有项目加载）
     ├── plugin-tools/                      #   私有 pnpm（v0.2.5；`bin/pnpm.cmd` shim + node_modules/pnpm）
@@ -659,10 +686,19 @@ stdout   = 逐行读取；含 "dsh web: http://127.0.0.1:<webPort>"
     ├── sessions/ storages/                #   仅历史残留（v0.1.2 全局 DSH_HOME；sessions 由迁移器读取）
     └── <md5(项目根目录)前16位>/            # ★ 每项目 DSH_HOME（**只承载数据面**）
         ├── ide.yml                        #   patch（每项目；含动态 mcpPort）
+        ├── settings.yaml                  #   ★ 0.2.1 的**待导入文档**（首次启动被 dsh 导入后改名 settings.yaml.imported）
         ├── profiles → ../../profiles      #   ★ 指向共享 profile 根的链接（junction/符号链接；v0.2.5）
         ├── sessions/ storages/            #   会话 + 工作区注册表 + 投影缓存（dsh 自动创建；每项目独立）
         └── attachments/                   #   图片附件对象存储（<DSH_HOME>/attachments/v1/objects/<sha256>）
 ```
+
+> **dsh 0.2.1 的配置面迁移（v0.2.6，实测驱动）**：0.1.5 用 `dsh-settings-file` 把 `settings.yaml` 当长期
+> 文档（可由 `- id: settings` 的 `path` 重定向）。0.2.1 移除了该包：设置改由 `dsh-config-editor` 持久化到
+> **profile 的 `cordis.patch.yml`**，而 `<DSH_HOME>/settings.yaml` 只在首次启动时被
+> `dsh-settings.importLegacyDocument()` 一次性导入（随后改名 `.imported`）。
+> 因此插件不再重定向设置，而是由 `DshHomeManager.migrateLegacySettings` 把 `<共享根>/settings.yaml`
+> 复制成 `<DSH_HOME>/settings.yaml`（幂等：`.imported` 存在即跳过），并顺带补写 `ui-onboarding`
+> 的内测声明版本（0.2.1 为 `2026-09-28.1`）。因为 `profiles` 已共享，**导入一次即对所有项目生效**。
 
 > **为什么 `profiles` 单独共享（v0.2.5）**：dsh 的插件包装在 `$DSH_HOME/profiles/<name>/node_modules`，
 > 而会话/工作区/附件都在 `$DSH_HOME` 下。只链接 `profiles` 一个目录即可实现"插件装一次、所有项目生效"，
@@ -676,16 +712,20 @@ stdout   = 逐行读取；含 "dsh web: http://127.0.0.1:<webPort>"
 > 表现为设置页刷新卡住）、已装插件凭空消失、`dsh plugin add` 偶发 exit=1。
 > 现由 `SharedConfigCleanupTest` 锁死"profiles/已装插件必须存活"。详见 `docs/PROJECT_NOTES.md`。
 
-> **为什么这样切分（v0.2.4，用户实测驱动）**：dsh 的**用户级配置面**天然只有一份（Web「Settings → Models」
-> 写的 `llm-pi-ai` / `llm-deepseek` 段、语言 `locale`、API Key、Agent 预设、个人技能），而**数据面**
-> （`sessions` / `storages` / 附件）必须按项目隔离才能保证"切项目后工作区不残留"（v0.1.3-dev 修复）。
-> 因此：配置面经 `ide.yml` 的 `- id: settings` / `- id: credentials` / `- id: agent-presets` /
-> `- id: skill-filesystem` patch 指向共享配置根，**dsh 直接读写共享文档**；数据面留在每项目 DSH_HOME。
+> **为什么这样切分（v0.2.4，用户实测驱动；v0.2.6 按 0.2.1 调整落点）**：dsh 的**用户级配置面**天然只有一份
+> （Web「Settings → Models」写的 `llm-pi-ai` / `llm-deepseek` 段、语言 `locale`、API Key、Agent 预设、个人技能），
+> 而**数据面**（`sessions` / `storages` / 附件）必须按项目隔离才能保证"切项目后工作区不残留"（v0.1.3-dev 修复）。
+> 0.2.1 起的落点分三类：
+> - **设置 / Agent 预设** → `profiles/web/cordis.patch.yml`（共享 profile 内，靠 `profiles` 链接共享）；
+> - **凭据** → `<共享根>/.credentials.yaml`（`- id: credentials`）；
+> - **个人技能** → `<共享根>/skills`（`- id: skill-filesystem` + `disabled: false`）；
+> - 数据面留在每项目 DSH_HOME。
 
-> **共享配置根（`DshHomeManager.sharedConfigRoot()`，= `dsh-home/`）**：`settings.yaml`、
-> `.credentials.yaml`、`.agent-presets/`、`skills/` 的唯一真源。路径沿用 v0.1.3-dev 以来的全局根，
-> 以免丢失用户既有的语言偏好与内测声明接受状态。插件不再参与配置同步：`syncCredentials()` 只做
-> **合并写入**（替换 `refs.DEEPSEEK_API_KEY`，保留其它 `refs` 与整个 `records` 段）。
+> **共享配置根（`DshHomeManager.sharedConfigRoot()`，= `dsh-home/`）**：所有项目共用的根。
+> 0.2.1 起 `.credentials.yaml` 与 `skills/` 仍是真源（patch 指向）；`settings.yaml` 降级为
+> **一次性导入源**（[migrateLegacySettings]），`.agent-presets/` 不再被读取。路径沿用 v0.1.3-dev
+> 以来的全局根，以免丢失用户既有的语言偏好与内测声明接受状态。插件不参与配置同步：
+> `syncCredentials()` 只做**合并写入**（替换 `refs.DEEPSEEK_API_KEY`，保留其它 `refs` 与整个 `records` 段）。
 
 > **v0.2.3 的致命缺陷（已修复）**：旧实现把共享根配置 `copyGlobalConfigTo` **覆盖**到每项目子目录，
 > 于是 dsh 写进子目录的用户配置（自定义模型、语言）在下次启动被覆盖而**消失**；同时 `- $settings:` /
@@ -724,32 +764,30 @@ stdout   = 逐行读取；含 "dsh web: http://127.0.0.1:<webPort>"
 
 ### 4.5 patch 模板（`ide.yml`）
 
-见 3.6；由 `McpPatchGenerator.generate(mcpPort, sharedConfigRoot)` 生成。**语法要点（dsh 0.1.5-rc.2 实测）**：
+见 3.6；由 `McpPatchGenerator.generate(mcpPort, sharedConfigRoot)` 生成。**语法要点（dsh 0.2.1-rc.2 实测）**：
 `--patch` 是叠加在 bundle 之上的覆盖层，两种形态——`insert:`（新增条目，新增 mcp-client 必须显式写
-`name`）与 `- id: <rowId>`（**整份替换**该条目的 `config`，未改字段必须重述）。共享配置化的四行即用后者：
+`name`）与 `- id: <rowId>`（按 id 覆盖，**只替换给出的字段**：`config` 整份替换、`disabled` 等同级字段
+可单独给出）。共享配置化只剩两行用后者：
 
 ```yaml
-- id: settings
-  config:
-    path: '<共享根>/settings.yaml'
 - id: credentials
   config:
-    path: '<共享根>/.credentials.yaml'
-- id: agent-presets
-  config:
-    default: standard          # Config.default 必填，整份替换时必须重述
-    includeUserRoot: false     # 否则仍会扫描 $DSH_HOME/.agent-presets（按项目隔离的旧根）
-    roots:
-      - path: '<共享根>/.agent-presets'
-        trust: user            # 必须是第一个 user 根：copy()/remove() 只认它
+    path: '<共享根>/.credentials.yaml'   # dsh-credentials-local 仍支持 path（version:1 + refs/records 布局未变）
 - id: skill-filesystem
+  disabled: false                        # 0.2.1 的 web 层把它置为 disabled:true（预设接管技能发现）
   config:
-    dshHome: '<共享根>'         # 用户技能根 = <共享根>/skills；项目根 <项目>/.dsh/skills 不变
+    dshHome: '<共享根>'                   # 用户技能根 = <共享根>/skills；项目根 <项目>/.dsh/skills 不变
 ```
+
+> ⚠️ **0.2.1 起不再生成 `settings` / `agent-presets` 两行**（详见 §3.6）：
+> `settings` 行已换成无 Config 的 `@deepseek-ai/dsh-settings`，`path` 被静默忽略；`agent-presets` 行已改名
+> 为 `agent-preset-registry`，按旧 id patch 只会得到一条 warn。设置与 Agent 预设的共享改由
+> **共享 profile 的 `cordis.patch.yml`** 承担（§4.4）。
 
 > ⚠️ **不要用 `- $settings:` / `- $credentials:`**：dsh 会报
 > `patch: id is required for non-insert patches` 并丢弃整条 patch（v0.1.3-dev ~ v0.2.3 的实际故障）。
-> 校验方法：`dsh --profile web --patch <ide.yml> --dump-config`（离线组合，不启动服务）。
+> 校验方法：`dsh --profile web --patch <ide.yml> --dump-config`（离线组合，不启动服务；0.2.1 下应只有
+> 零条 `patch: …` 报错，且 `- id: credentials` / `- id: skill-filesystem` 的行被列出）。
 
 ## 5. 数据流
 
@@ -872,3 +910,4 @@ PRD §7 验收清单 9 条（含 v0.1.3-dev 新增"DSH 一键解释"）。
 | 2026-09-17 | v0.2.4 | **修复"发送选中代码 / 日志一键解释 没反应"**（用户报告，真实页面 CDP 实测定位）。根因三项：① dsh 0.1.5 的 composer 是 **Lexical `contenteditable`**（`<div data-lexical-editor="true" role="textbox" contenteditable="true">`），旧的 `document.querySelector('textarea')` 命中 0 → 注入静默失败；② 回读判定读错位置——Lexical 文本在 `[data-lexical-text="true"]` 节点里，写入**当拍**根元素 `innerText`/`textContent` 可能为空，导致"已成功注入"被误判为失败并降级剪贴板；③ 输入框**仅在进入会话后**渲染（停在内测声明/"选择工作区"时命中 0），需重试等待。**修复**：新增纯对象 `ComposerScripts`（可单测）统一构造注入脚本——选择器四级回退、contenteditable 走 `execCommand('insertText')`（派发 `beforeinput`，Lexical 据此同步内部状态；失败退回合成 `paste`）、回读走 `[data-lexical-text]` 并轮询 ≤2s、提交用带 `keyCode/which` 的 Enter 后轮询清空判 `submitted`、兜底点发送按钮（不用 class 通配）；结果语义扩为 `injected/submitted/blocked/notfound/failed`，仅后两者降级剪贴板+通知（不再"脚本已下发"即乐观提示）。`sendSelection` 与 `sendQuestion` 共用该脚本，`PendingSend` 增加 `kind` 区分回传处理。**验证**：headless Edge + CDP 在真实 dsh 0.1.5 页面上对照实测——`insertText` ✅（`execReturn=true`，立即回读命中）、合成 `beforeinput` ❌、纯改 DOM ❌、Enter 提交 501ms 内清空 ✅；新增 `ComposerScriptsTest`（11 例）锁定契约。测试 **194 项全部通过** |
 | 2026-09-17 | v0.2.4 | **dsh 配置共享化：修复"新模型 / API Key / Agent 预设重启后消失"**（用户实测驱动）。**根因三重（实测）**：① `DshHomeManager.ensureHome` 的 `copyGlobalConfigTo` 每次启动把共享根 `settings.yaml`/`.credentials.yaml` **`REPLACE_EXISTING` 覆盖**到每项目 DSH_HOME，而 dsh 的配置真源是 `$DSH_HOME`（`dsh-home-paths` 解析顺序：显式配置 > `$DSH_HOME` > `~/.dsh`；Web「Models」页写的 `llm-pi-ai`/`llm-deepseek`、语言 `locale` 都落项目子目录）→ 下次启动被清空；② 全局化用的 `- $settings:` / `- $credentials:` patch 语法**被 dsh 拒绝**：`dsh --profile web --patch <ide.yml> --dump-config` 报 `patch: id is required for non-insert patches`，整条 patch 被丢弃；③ `DshBridgeManager.writePatch()` 从未把共享根传给 `McpPatchGenerator`（`globalConfigDir` 走默认空值）。**方案（§4.4/§4.5）**：删除 `copyGlobalConfigTo`；patch 改 `- id: settings` / `- id: credentials` / `- id: agent-presets`（整份覆盖须重述必填 `default: standard`，并置 `includeUserRoot: false` 以免再扫 `$DSH_HOME/.agent-presets`）/ `- id: skill-filesystem`（`dshHome`）四段——共享面 = 设置文档 + 凭据 + Agent 预设 + 个人技能；数据面（`sessions`/`storages`/附件）仍按项目隔离（dsh 全库仅 `dshHomePath('sessions'\|'storages')` 两处）。**配套**：① 新增 `SharedConfigMigrator`（标记 `<共享根>/.plugin-layout-version`）——按顶层 namespace 与 `refs`/`records` 做**文本级**合并（共享侧优先、只补缺，保留注释/`!!js`；扁平凭据内联升级为 `version:1`），原文件移入 `<共享根>/migrated/<hash>/` 备份，逐项目失败降级且不写标记；② `syncCredentials()` 改 `YamlText.upsertRef` 合并写入（只替换 `refs.DEEPSEEK_API_KEY`，不再用扁平 layout 整份覆盖、不再抹掉 dsh 的 `records.client-connection/browser-session`）；③ `DshCredentialsSync` 废弃为空操作（dsh 与插件写同一份共享凭据）；④ **MCP 脚本零链接**：部署在 `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/`——Node 的 ESM 解析按**真实路径**查找、**不越过 junction**（实测放 `<运行时根>/.dsh-ide-bridge/` 会 `ERR_MODULE_NOT_FOUND`），故**删除每项目 `node_modules` junction**，`cleanLegacySharedRoot`/`cleanLegacyProjectHome` 清理历史残留；⑤ 设置页新增「共享配置目录」只读展示 + 打开按钮，API Key 回显改读共享文档的 `refs` 段。新增 `SharedConfigMigratorTest`（23 例）、重写 `McpPatchGeneratorTest`（11 例，含"绝不出现 `$id` 形态"回归断言）。**测试环境对齐**：`tooling/runtime-dev` 原为 dsh **0.1.1-rc.2**（与 `DSH_VERSION` 不一致，导致 2 个 workspace 冒烟长期失败：旧契约点号 RPC、启动 URL 无 token），已用 `build/runtime-win-x64.zip` 对齐到 **0.1.5-rc.2**（Node 22.23.2），旧树留作 `tooling/runtime-dev/{node,dsh}-0.1.1-backup`。测试 **194 项全部通过**（含 4 个真实 dsh 冒烟） |
 | 2026-10-18 | v0.2.5 | **dsh 插件包"装一次、多项目生效"（用户诉求：一个项目安装、所有项目生效）**。**根因**：dsh 从 `$DSH_HOME/profiles/<name>` 解析 profile（`dsh-app-boot` 的 `resolveProfileDir`），插件把 DSH_HOME 按项目隔离（v0.1.3-dev），于是 `dsh plugin --profile web add <pkg>` 只落在当前项目 → 插件包不共享（v0.2.4 共享的是**配置面**：settings/credentials/预设/技能）。**方案 A（已实测通过）**：把**每项目的 `<DSH_HOME>/profiles` 目录**链接到 `<共享根>/profiles`（Windows junction / 其它平台符号链接）——只共享 profile，`sessions`/`storages`/`attachments` 仍在各自 home，数据隔离不变（实测两实例并发正常、各写各家）。否决方案 B（全局化 DSH_HOME + patch 把数据面指回项目）：需覆盖 sessions/storages/attachments/spill 全部数据面，易遗漏。**新增**：① `SharedProfilesLink`（纯逻辑四态判定：不存在/真实目录/正确链接/指向别处 + 播种/回填清单 + 用户内容判定）；② `DshHomeManager.ensureProfiles`（建链/修链/迁移/关闭回填）——真实目录先播种共享（共享优先、只补缺）再**整目录移动**备份到 `<共享根>/profiles-migrated/<hash>/`（跨卷退到同父目录改名），建链失败**移回原处**；任何失败降级为"项目独立 profile"（dsh 对 profile 加载 fail-loud，绝不能让共享功能把 dsh 弄挂），原因经 `profilesState()` 呈现；`MIGRATED_PROFILES_DIR` 常量；③ 设置项 `shareDshProfiles`（默认 true）+ 主设置页勾选（改动后对已打开项目立刻重跑 `ensureHome`）；④ `DshProfileManifest`（**自研极简 JSON 读取器**，不引入第三方依赖；`Profile.entries()` 区分 bundle 插件与纯依赖；`validateSpec` 拒绝空白/shell 元字符/相对路径）；⑤ `DshPluginInstaller`（**转发给 dsh 自己的 `plugin` 子命令**而非直接调 pnpm——复用其 profile 初始化、相对规格锚定与 `reconcilePlugins`；PATH 里补 `<共享根>/plugin-tools/bin` 的**私有 pnpm**（运行时自带 npm 装 `pnpm@9.15.9`，shim 为 `pnpm.cmd`/shebang 脚本），不改用户全局环境；操作前备份 manifest/lockfile 到 `<共享根>/plugin-backups/<时间戳>/`，失败回滚；全局加锁串行化；`^` 版本范围在 Windows 自动加引号——实测不加引号会被 `cmd` 当转义符吃掉）；⑥ `DshPluginsConfigurable`（`id=dsh.plugins`，`parentId=dsh.settings`：项目选择 + 共享状态 + 插件表格 + 安装/卸载/本地目录/刷新/打开目录 + 命令输出区）+ 工具窗标题栏 `ManagePluginsAction`（dsh Web UI 无安装入口，`ui-settings-plugin-inventory` 只读）。**真实环境冒烟（本机实测）**：`dsh plugin --profile web add link:<本地插件>` → 包落进共享 profile、`bundles` 自动追加 `test-shared`；从**另一个** home（仅经 junction 指向共享 profiles）启动 dsh → 打印 `SHARED-PLUGIN-LOADED name=test-shared` 且 `dsh web` 正常出 token URL。新增 `SharedProfilesLinkTest`(11) / `DshProfileManifestTest`(14) / `DshPluginInstallerTest`(13)。**安装过程反馈（用户反馈后补做）**：`Phase` 阶段回调 + 每秒计时 + 2s 静默心跳（不写入输出）+ 实时流式输出（150ms 节流、4000 行上限）+ 不定进度条 + 可取消（200ms 轮询 → 杀子进程 + 回滚 manifest；关闭设置页也会中止）+ 明确结果（绿 ✓/红 ✗ + 用时 + 输出区结果行 + IDE 通知），见 §3.12.1；新增 `DshPluginInstallerStreamingTest`(5)。**刷新卡住 / 插件消失事故（用户反馈后补做）**：`cleanLegacySharedRoot` 的清理列表含 `<共享根>/profiles`（v0.1.2 遗留），而它由 `ensureHome` 每次启动/刷新调用 → 递归删除共享 profile（上万文件 → 数十秒"刷新卡住"）并让已装插件消失；修复为移除该条目 + 铁律注释，新增 `SharedConfigCleanupTest`(3) 回归。配套：设置页刷新改走轻量 `ensureProfileHome`（不跑 ensureHome 的重量级步骤）、状态文案分场景（只有子进程阶段才提"可取消"）、`.plugin-layout-version` 改布局版本常量、`ensureHome` 加分段耗时日志、profile 链接操作加可重入锁。测试 **260 项全部通过** | **发布（2026-10-18）**：GitHub Release 0.2.5（id 416360059，11 资产）+ Marketplace update 1197216（待审）。**发布踩坑**：tag 触发的 CI 会重建并上传其中 3 个平台 runtime，其 zip 与本地构建**字节数相同、sha256 不同**；补传脚本曾只按 size 跳过 .sha256 → zip/校验文件错配（用户首次下载校验必失败）。已改为**以远端 .sha256 内容为准成对同步**并在结束时复核；详见 docs/RELEASE_PROCESS.md 与 docs/v0.2.5-retrospective.md。 |
+| 2026-11-20 | v0.2.6 | **dsh 运行时 0.1.5-rc.2 → 0.2.1-rc.2**（用户要求；先做兼容性分析再实施）。**实测基线（全部复验）**：Node 22.23.2 支持新版 `bin.js` 的 `import.meta.main`；插件现有命令行（`--profile web --patch ide.yml --host 127.0.0.1 --port 0 --no-open`）可正常启动并打印 `dsh web: http://127.0.0.1:<port>/?token=…`；鉴权（`?token=` → 303 + `dsh-auth-…` cookie）、gateway 信封（`payload.args.request`）、`workspace/create`+`insertBefore`、`storages/workspace.json` v2、composer DOM（Lexical/markers/`input.send`）、`mcp-client` Config、`--patch` 语法、profile 模板 bundles（仍 `dsh-base`+`dsh-web-app`）、凭据 `version:1+refs/records` **均未变**。**四处破坏性变更 + 解法**：① **MCP SDK 缺口（P0，工具全挂）**：0.2.1 改用 `@modelcontextprotocol/client@2`，安装树不再有 `@modelcontextprotocol/sdk`/`express`（实测三个 import 全 `ERR_MODULE_NOT_FOUND`）→ `build-runtime.mjs` 新增 `BRIDGE_DEPS`（`sdk ^1.30.0` + `express ^5.2.1`）随运行时安装，并在冒烟段**逐条断言四个 specifier 可解析**（缺失即构建失败）；同时修正 `--output`/`--cache` 相对路径按仓库根解析（npm 以 `<output>/dsh` 为 cwd，曾致安装失败）。协议侧实测 v1 SDK 服务端 ↔ 0.2.1 v2 客户端在 `failOnStartupError: true` 下握手/工具同步通过，故**不重写协议**。② **`settings` 行失效**：改为无 Config 的 `@deepseek-ai/dsh-settings`，`path` 被静默忽略；`dsh-settings-file` 被移除，设置改由 `dsh-config-editor` 写入 **profile 的 `cordis.patch.yml`**，旧 `<DSH_HOME>/settings.yaml` 仅一次性导入（改名 `.imported`）→ patch 删去该段；新增 `DshHomeManager.migrateLegacySettings` + `SharedConfigMigrator.importLegacySettingsInto`（把 `<共享根>/settings.yaml` 复制成待导入文档，幂等靠 `.imported`，并补写 `ui-onboarding` 内测声明），配置共享改由 v0.2.5 的 `profiles` 链接天然承担。③ **`agent-presets` 行不存在**（改名 `agent-preset-registry`，Config 仅 `default`/`selectedDefault`）→ dsh 只 warn 跳过（`--dump-config` 实测）；patch 删去该段，0.2.1 的预设为 profile 内声明式行，随共享 profile 共享。④ **`skill-filesystem` 在 web 层 `disabled: true`**（预设接管技能发现），只换 config 不生效 → patch 追加 `disabled: false` 恢复"部署级技能提供者"（项目级 `<项目>/.dsh/skills` 不受影响）。**其他适配**：`WELCOME_NOTICE_VERSION` `2026-08-13.1` → `2026-09-28.1`（源码 `dsh-client-ui-settings-models/lib/client.js:3058`）；`dsh plugin` 新增 `engines.dsh` 兼容闸门与 `allow-version/revoke-version` 子命令、失败行 `plugin command failed; diagnostics: <path>` → `DshPluginInstaller.failureNotes` 识别并转成"照做即可"的下一步；`DshHomeManager.mcpDepsPresent()` 在部署脚本前校验运行时树是否含 SDK（自定义 `DSH_IDEA_RUNTIME` 缺依赖时明确 warn 而非静默降级）；设置页文案与占位注释改为"设置写入共享 profile 的 patch 层"。**测试**：`McpPatchGeneratorTest` 重写（锁定"绝不再 patch settings/agent-presets"与 `disabled:false`）、新增 `SharedSettingsImportTest`（6 例幂等/合并/跳过）、`DshPluginInstallerTest` 增 3 例、`DshMcpBridgeSmokeTest` 增强 `assertEsmResolves`（+`express`）。`tooling/runtime-dev` 重建为 0.2.1（旧树留 `dsh-0.1.5-backup`）。 |

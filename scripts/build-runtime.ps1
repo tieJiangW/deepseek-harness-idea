@@ -1,9 +1,9 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$OutputDir = "build/runtime",
     [string]$NodeVersion = "22.23.2",
     [string]$NodeSha256 = "1177B4137BA5ADAA56354AE40F1080C7450E8AE09CECB47DA459D1C52AC99F97",
-    [string]$DshVersion = "0.1.5-rc.2",
+    [string]$DshVersion = "0.2.1-rc.2",
     [string]$Mirror = "https://registry.npmmirror.com/-/binary/node",
     [string]$NpmRegistry = "",
     [string]$CacheDir = "",
@@ -21,6 +21,9 @@ if (-not $NpmRegistry) {
 if (-not $CacheDir) {
     $CacheDir = Join-Path $OutputDir ".npm-cache"
 }
+# 相对路径按仓库根解析成绝对路径：npm 以 <output>/dsh 为 cwd 运行，相对 --cache 会被解析到该 cwd 下。
+if (-not [System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir = Join-Path $root $OutputDir }
+if (-not [System.IO.Path]::IsPathRooted($CacheDir)) { $CacheDir = Join-Path $root $CacheDir }
 
 $nodeZipName  = "node-v$NodeVersion-win-x64.zip"
 $nodeUrl      = "$Mirror/v$NodeVersion/$nodeZipName"
@@ -81,24 +84,25 @@ if (-not (Test-Path $nodeExe)) {
 }
 
 # ---------- 2. @deepseek-ai/dsh ----------
+# 版本漂移防护（v0.2.6 实测踩坑）：目录里是旧版 dsh 时，只判 `Test-Path $dshBin` 会直接复用并重新打包，
+# 产出"看着成功、实际是旧运行时"的资产（旧树的传递依赖还可能骗过 bridge 断言）。故比对版本。
 if (Test-Path $dshBin) {
-    if ($Force) {
-        Write-Step "dsh exists, -Force reinstall"
+    $dshPkgJson = Join-Path $dshDir "node_modules/@deepseek-ai/dsh/package.json"
+    $installed = if (Test-Path $dshPkgJson) { (Get-Content $dshPkgJson -Raw | ConvertFrom-Json).version } else { $null }
+    if ($Force -or $installed -ne $DshVersion) {
+        Write-Step "dsh tree carries '$installed' but '$DshVersion' was requested; reinstalling the dsh subtree"
         Remove-Item $dshDir -Recurse -Force
     } else {
-        Write-Step "dsh exists, skip install"
-        $dshPkgJson = Join-Path $dshDir "node_modules/@deepseek-ai/dsh/package.json"
-        if (Test-Path $dshPkgJson) {
-            $ver = (Get-Content $dshPkgJson -Raw | ConvertFrom-Json).version
-            Write-Host "   dsh $ver"
-        }
+        Write-Step "dsh $installed exists, skip install"
     }
 }
 
 if (-not (Test-Path $dshBin)) {
-    Write-Step "Install @deepseek-ai/dsh@$DshVersion (npm --ignore-scripts)"
+    Write-Step "Install @deepseek-ai/dsh@$DshVersion + MCP bridge deps (npm --ignore-scripts)"
     New-Item -ItemType Directory -Force -Path $dshDir | Out-Null
-    $pkgJson = '{"name":"dsh-runtime","private":true,"dependencies":{"@deepseek-ai/dsh":"' + $DshVersion + '"}}'
+    # bridge 依赖：dsh 0.2.1 起安装树不再含 @modelcontextprotocol/sdk / express，
+    # 而插件自带的 mcp-ide-server.mjs 需要它们（缺失 → ide_* 工具全失效）。
+    $pkgJson = '{"name":"dsh-runtime","private":true,"dependencies":{"@deepseek-ai/dsh":"' + $DshVersion + '","@modelcontextprotocol/sdk":"^1.30.0","express":"^5.2.1"}}'
     [System.IO.File]::WriteAllText((Join-Path $dshDir "package.json"), $pkgJson, [System.Text.UTF8Encoding]::new($false))
 
     $npmCli = Join-Path $nodeDir "node_modules/npm/bin/npm-cli.js"
@@ -119,8 +123,32 @@ if (-not (Test-Path $dshBin)) {
 Write-Step "Smoke verification"
 $resolvedDshDir = if ([System.IO.Path]::IsPathRooted($dshDir)) { $dshDir } else { Join-Path $root $dshDir }
 $dshPkgDir = (Join-Path $resolvedDshDir "node_modules/@deepseek-ai/dsh") -replace '\\','/'
-& $nodeExe -e "const p=require(process.argv[1] + '/package.json');console.log('   dsh ' + p.version);" $dshPkgDir
-if ($LASTEXITCODE -ne 0) { throw "dsh version check failed" }
+# 版本硬断言：宁可构建失败，也不要打出一个"版本不对但看着成功"的运行时资产
+$builtVersion = (Get-Content (Join-Path $resolvedDshDir "node_modules/@deepseek-ai/dsh/package.json") -Raw | ConvertFrom-Json).version
+if ($builtVersion -ne $DshVersion) {
+    throw "runtime carries dsh $builtVersion but $DshVersion was requested (delete $dshDir or pass -Force)"
+}
+Write-Host "   dsh $builtVersion"
+
+# MCP bridge 依赖断言：必须能从 <output>/dsh/node_modules 解析（ESM eval 以 cwd 为解析基准）
+Write-Step "Verify MCP bridge dependencies"
+$bridgeModules = @(
+    "@modelcontextprotocol/sdk/server/mcp.js",
+    "@modelcontextprotocol/sdk/server/streamableHttp.js",
+    "@modelcontextprotocol/sdk/server/express.js",
+    "zod/v4"
+)
+Push-Location $resolvedDshDir
+try {
+    foreach ($m in $bridgeModules) {
+        # 注意：字符串里的 ${m} 必须带花括号 —— `$m:` 会被 PowerShell 当作"作用域限定变量名"而报语法错误
+        $probe = "import('${m}').then(()=>console.log('   ok ${m}')).catch(e=>{console.error('   MISSING ${m}:'+e.code);process.exit(1)})"
+        & $nodeExe --input-type=module -e $probe
+        if ($LASTEXITCODE -ne 0) { throw "MCP bridge dependency missing: $m" }
+    }
+} finally {
+    Pop-Location
+}
 
 # ---------- 4. Bundle ----------
 if ($Bundle) {

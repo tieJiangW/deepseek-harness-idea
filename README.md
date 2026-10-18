@@ -13,7 +13,7 @@ changes with native diff tooling.
 > This plugin is not an official DeepSeek product; DeepSeek Harness and the DeepSeek trademark belong
 > to their respective owners.
 
-当前版本 / Current version：**0.2.5**
+当前版本 / Current version：**0.2.6**（内置运行时 dsh **0.2.1-rc.2** + Node.js 22.23.2）
 
 ---
 
@@ -34,7 +34,7 @@ changes with native diff tooling.
 
 **跨项目共享 / Cross-project sharing**
 
-- **配置共享 / Shared config** — 模型、供应商、API Key、Agent 预设、个人技能在共享配置目录里配置一次，即对所有项目生效。
+- **配置共享 / Shared config** — 模型、供应商、API Key、Agent 预设、个人技能配置一次，即对所有项目生效（dsh 0.2.1 起设置写入共享 profile 的 patch 层）。
 - **插件共享 / Shared dsh plugins** — **dsh 插件包装一次、所有项目加载**：每项目的 `profiles/` 链接到统一共享 profile，装一次即全局生效；会话、工作区与附件仍按项目隔离。
 - **每项目独立数据面 / Per-project data** — 每个项目独立 DSH_HOME（会话、工作区、附件），切换项目不串台。
 
@@ -56,12 +56,12 @@ changes with native diff tooling.
 
 - IntelliJ IDEA Community / Ultimate **2024.1 – 2026.2**（build 241 – 262；Windows 10/11 x64、macOS arm64/x64、Linux x64）
 - 持有 DeepSeek API Key（`deepseek-chat` / `deepseek-reasoner`）
-- 构建机器需要网络（构建时下载 Node.js 22.23.2 与 `@deepseek-ai/dsh@0.1.5-rc.2`）；**运行时按平台解析**：首次使用需联网一次下载运行时（SHA-256 校验，缓存到配置目录后离线可用；离线可用设置页「运行时目录」/ `DSH_IDEA_RUNTIME` / 内网镜像 / fat zip）；**五个平台**（Windows x64、macOS arm64/x64、Linux x64/arm64）的运行时资产随 Release 提供
+- 构建机器需要网络（构建时下载 Node.js 22.23.2 与 `@deepseek-ai/dsh@0.2.1-rc.2`，并额外装入 MCP bridge 依赖 `@modelcontextprotocol/sdk` + `express`）；**运行时按平台解析**：首次使用需联网一次下载运行时（SHA-256 校验，缓存到配置目录后离线可用；离线可用设置页「运行时目录」/ `DSH_IDEA_RUNTIME` / 内网镜像 / fat zip）；**五个平台**（Windows x64、macOS arm64/x64、Linux x64/arm64）的运行时资产随 Release 提供
 - 安装 dsh 插件包时需要网络（访问 npm registry；可使用镜像）
 
 ## 安装 / Install
 
-1. 构建插件 zip（见下）或下载 [Releases](../../releases) 中的 `deepseek-harness-idea-0.2.5.zip`（瘦身约 2MB，跨平台单个 zip）与对应平台的 `runtime-<os>-<arch>.zip`（附 `.sha256`；五个平台资产齐全）。
+1. 构建插件 zip（见下）或下载 [Releases](../../releases) 中的 `deepseek-harness-idea-0.2.6.zip`（瘦身约 2MB，跨平台单个 zip）与对应平台的 `runtime-<os>-<arch>.zip`（附 `.sha256`；五个平台资产齐全）。
 2. IDEA 中 `Settings → Plugins → ⚙ → Install Plugin from Disk…` 选择该 zip，重启 IDE。
 3. 打开右侧 **DeepSeek Harness** 工具窗口（首次打开自动下载并解压当前平台运行时，约 1 分钟；之后复用本地缓存不再下载）。
 4. `Settings → Tools → DeepSeek Harness` 填入 DeepSeek API Key（或从本机已有 DeepSeek 配置一键导入）并应用，开始对话。
@@ -190,11 +190,12 @@ IntelliJ IDEA (JVM/EDT)
         ▼
 Node 子进程（DSH）
 ├─ dsh web server（仅 loopback）
-└─ mcp-client(ide) ──streamable-http──► MCP Server（mcp-ide-server.mjs，6 个 ide_* 工具）
+└─ mcp-client(ide) ──streamable-http──► MCP Server（mcp-ide-server.mjs，7 个 ide_* 工具）
 ```
 
-**目录布局（v0.2.5）**：`<配置目录>/dsh-idea/dsh-home/` 是共享配置根（settings / 凭据 / 预设 / 技能 /
-`profiles/` 共享插件 / `plugin-tools/` 私有 pnpm / `plugin-backups/` 操作备份 / `profiles-migrated/` 迁移备份），
+**目录布局（v0.2.6，dsh 0.2.1）**：`<配置目录>/dsh-idea/dsh-home/` 是共享配置根（`profiles/` 共享
+profile——设置与 Agent 预设写入其 `web/cordis.patch.yml`、凭据 `.credentials.yaml`、个人技能 `skills/`、
+`plugin-tools/` 私有 pnpm / `plugin-backups/` 操作备份 / `profiles-migrated/` 迁移备份），
 其下每个 `<md5(项目路径)>/` 是该项目的数据面（sessions / storages / attachments / `ide.yml`），其中
 `profiles` 是指向共享根的链接。详见 [docs/DESIGN.md §4.4](docs/DESIGN.md)。
 
@@ -210,7 +211,7 @@ Node 子进程（DSH）
 
 ## 测试 / Tests
 
-- **260 个测试**：256 单元 + 4 集成冒烟（真实 dsh 启动 / MCP 桥接 7 工具 / 切换项目工作区顺序 / 旧会话升级迁移）。
+- **270 个测试**：266 单元 + 4 集成冒烟（真实 dsh 0.2.1 启动 / MCP 桥接 7 工具 + bridge 依赖解析 / 切换项目工作区顺序 / 旧会话升级迁移）。
 - 冒烟测试需要 `DSH_IDEA_RUNTIME` 指向预构建运行时目录，否则自动跳过。
 
 ## 许可 / License

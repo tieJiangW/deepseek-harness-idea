@@ -145,7 +145,7 @@ DeepSeek Harness（DSH）是一个以本地 Web UI（`dsh web`，默认 `http://
 | NFR-01 | 性能 | 运行时就绪后（首次按平台下载并解压完成后的后续使用），工具窗口从打开到可对话 ≤ 15s（本地磁盘、正常机器）；首次下载约 93MB 运行时为一次性成本（v0.2.1 带进度/取消）；Node 实例空闲内存可接受（dsh 正常水平）；UI 操作不阻塞 EDT |
 | NFR-02 | 安全 | 所有服务仅绑定 127.0.0.1；MCP/Bridge 间使用随机 token；API Key 不落日志、不落插件源代码；不使用 `--host 0.0.0.0`（dsh 本身拒绝） |
 | NFR-03 | 可靠性 | 安装/解压幂等；崩溃可自动重启（退避）；项目关闭/IDE 退出无残留进程；磁盘写失败有明确报错 |
-| NFR-04 | 可维护性 | dsh 版本固定（`@deepseek-ai/dsh@0.1.5-rc.2`），升级=重建运行时；DSH_HOME 版本化目录便于升级；模块边界清晰（runtime/bridge/mcp/review/ui/settings 分离） |
+| NFR-04 | 可维护性 | dsh 版本固定（`@deepseek-ai/dsh@0.2.1-rc.2`），升级=重建运行时；DSH_HOME 版本化目录便于升级；模块边界清晰（runtime/bridge/mcp/review/ui/settings 分离） |
 | NFR-05 | 兼容性 | IntelliJ IDEA 2024.1 – 2026.2（Community/Ultimate，until 262.*）；Windows 10/11 x64、macOS（arm64/x64）、Linux x64；路径含空格/中文可用；JCEF 不可用有降级；运行时按平台解析（首次下载，缓存后离线可用，v0.2.0 起） |
 | NFR-06 | 可用性 | 关键失败（缺 Key、Node 缺失、端口异常、崩溃）均有中文+英文明确提示与恢复路径；不静默失败 |
 
@@ -168,7 +168,7 @@ MVP 成功标准：全新 IDEA 实例中，安装插件 zip → 配置 API Key �
 - Windows 10/11 x64、macOS（arm64/x64）、Linux x64；IntelliJ IDEA Community/Ultimate 2024.1 – 2026.2（until 262.*）。
 - 用户持有 DeepSeek API Key（`deepseek-chat` / `deepseek-reasoner` 可用）。
 - 构建机有网络（构建时下载 Node 与 dsh 依赖）；**运行时按平台解析**：首次使用需联网一次下载运行时（SHA-256 校验，缓存到配置目录后离线可用；离线可用 `DSH_IDEA_RUNTIME` / 内网镜像 / fat zip）。
-- dsh 版本固定 0.1.5-rc.2（与当前环境一致），其 Web UI 与 `--patch`/mcp-client 行为以该版本为准。
+- dsh 版本固定 0.2.1-rc.2（与当前环境一致），其 Web UI 与 `--patch`/mcp-client 行为以该版本为准；dsh 0.2.1 不再自带 MCP server SDK，运行时构建显式装入 `@modelcontextprotocol/sdk` + `express`（v0.2.6）。
 - 插件不修改用户本机已有的 DeepSeek 配置（独立 DSH_HOME），避免与浏览器版 dsh 互相干扰。
 
 ## 9. 风险与缓解
@@ -182,7 +182,8 @@ MVP 成功标准：全新 IDEA 实例中，安装插件 zip → 配置 API Key �
 | JCEF 兼容性（WebSocket/IME） | 聊天/中文输入异常 | "外部浏览器打开"按钮兜底；JCEF 版本随 IDE 更新 |
 | 多项目并发资源占用 | 内存/端口 | 每项目实例 + 并发上限 3 + 懒启动；后续可优化为单实例多工作区 |
 | 杀软拦截 node.exe | 启动失败 | 文档说明加白名单；日志可诊断；失败提示明确 |
-| dsh web UI 依赖最新前端构建 | 功能缺失 | 固定 dsh 版本并与当前 GUI 版本对齐（0.1.5-rc.2） |
+| dsh web UI 依赖最新前端构建 | 功能缺失 | 固定 dsh 版本并与当前 GUI 版本对齐（0.2.1-rc.2） |
+| dsh 升级后移除插件依赖的包（如 0.2.1 的 `@modelcontextprotocol/sdk`/`express`） | MCP 工具静默失效 | 运行时构建显式声明 bridge 依赖 + 构建期逐条断言解析 + 冒烟 `assertEsmResolves` 回归门（v0.2.6 起） |
 
 ## 10. 迭代规划与范围管理
 

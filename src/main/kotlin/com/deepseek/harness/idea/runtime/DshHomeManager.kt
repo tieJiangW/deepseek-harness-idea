@@ -21,18 +21,23 @@ import java.util.concurrent.locks.ReentrantLock
  * 目录布局（见 docs/DESIGN.md §4.4）：
  * - 运行时根：环境变量 `DSH_IDEA_RUNTIME`（开发态覆盖）或
  *   `<config>/dsh-idea/runtime/<version>`（生产态从插件资源解压/下载）。
- *   内含 `node/`（Node.js）、`dsh/`（npm 安装的 @deepseek-ai/dsh 树）与
+ *   内含 `node/`（Node.js）、`dsh/`（npm 安装的 @deepseek-ai/dsh 树，**含 MCP bridge 依赖**）与
  *   `.dsh-ide-bridge/mcp-ide-server.mjs`（全局唯一一份 MCP 脚本）。
- * - **共享配置根** [sharedConfigRoot]：`<config>/dsh-idea/dsh-home`，dsh 的**用户级配置面**唯一真源
- *   （`settings.yaml`、`.credentials.yaml`、`.agent-presets/`、`skills/`），所有项目共享；
- *   由 `ide.yml` 的 `- id: settings` / `- id: credentials` / `- id: agent-presets` /
- *   `- id: skill-filesystem` patch 指向（见 [com.deepseek.harness.idea.mcp.McpPatchGenerator]）。
+ * - **共享配置根** [sharedConfigRoot]：`<config>/dsh-idea/dsh-home`，所有项目共用。
+ *   dsh 0.2.1 起分两层：
+ *   - **设置/Agent 预设**落在 `<共享根>/profiles/web/cordis.patch.yml`（dsh 的配置真源已从
+ *     `settings.yaml` 改为 profile patch，见 `dsh-config-editor`）；`profiles` 目录由
+ *     [sharedProfilesRoot] 共享（v0.2.5 的 junction），故**天然跨项目共享**，插件不再重定向。
+ *   - **凭据 / 用户技能**仍由 [ide.yml][McpPatchGenerator] 的 `- id: credentials` /
+ *     `- id: skill-filesystem` patch 指向本目录（`.credentials.yaml`、`skills/`）。
+ *   旧的 `<共享根>/settings.yaml` 只作为**一次性导入源**（见 [migrateLegacySettings]）。
  * - **每项目 DSH_HOME** [homeDir]：`<共享配置根>/<md5(项目路径)前16位>`，只承载 dsh 的**数据面**
  *   （`sessions/`、`storages/`、`profiles/web/`、`ide.yml`），使工作区注册表与会话按项目隔离
  *   （v0.1.3-dev 切换项目修复）。
  *
- * **v0.2.4 变更**：删除"全局配置复制到每项目子目录"（`copyGlobalConfigTo`）与每项目
- * `node_modules` junction；配置改为经 patch 直接落在共享根，插件不再参与配置同步。
+ * **版本演进**：v0.2.4 删除"全局配置复制到每项目子目录"与每项目 `node_modules` junction；
+ * v0.2.6（dsh 0.2.1）再删除 `settings` / `agent-presets` 两段 patch（对应行已不存在或不再接受
+ * `path`/`roots`），设置共享改由共享 profile 承担。
  */
 @Service(Service.Level.APP)
 class DshHomeManager : Disposable {
@@ -41,7 +46,7 @@ class DshHomeManager : Disposable {
         private val LOG = Logger.getInstance(DshHomeManager::class.java)
 
         /** 固定 dsh 版本（升级 = 换版本 + 重建运行时，见 DESIGN §3.2） */
-        const val DSH_VERSION = "0.1.5-rc.2"
+        const val DSH_VERSION = "0.2.1-rc.2"
 
         /** 构建期注入的版本信息资源（generateBuildInfo 产出，供运行期读取插件版本，避免用内部 API）。 */
         const val BUILD_INFO_RESOURCE = "/dsh-build-info.properties"
@@ -96,8 +101,14 @@ class DshHomeManager : Disposable {
         fun getInstance(): DshHomeManager =
             ApplicationManager.getApplication().getService(DshHomeManager::class.java)
 
-        /** dsh 内测声明 acknowledge 版本（与 dsh 源码 WELCOME_NOTICE_VERSION 一致；变化需同步）。 */
-        const val WELCOME_NOTICE_VERSION = "2026-08-13.1"
+        /**
+         * dsh 内测/欢迎声明 acknowledge 版本（与 dsh 源码 `WELCOME_NOTICE_VERSION` 一致；变化需同步）。
+         *
+         * 0.2.1-rc.2 实测值来自 `dsh-client-ui-settings-models/lib/client.js:3058`
+         * （0.1.5 为 `2026-08-13.1`）。该值随 `ui-settings-general` 行的 `welcomeNoticeVersion`
+         * 配置持久化到 profile patch，故旧值不会自动迁移 —— 插件在首次导入时补写。
+         */
+        const val WELCOME_NOTICE_VERSION = "2026-09-28.1"
 
         /** 每项目 DSH_HOME 目录名：`md5(项目路径)` 前 16 位十六进制（应用级共享根的隔离键）。 */
         internal val PROJECT_DIR_NAME = Regex("^[0-9a-f]{16}$")
@@ -295,14 +306,16 @@ class DshHomeManager : Disposable {
         }
     }
 
-    // ---- 共享配置根（v0.2.4） ----
+    // ---- 共享配置根（v0.2.4；v0.2.6 按 dsh 0.2.1 契约分层） ----
 
     /**
      * 共享配置根：`<config>/dsh-idea/dsh-home`。
      *
-     * 这是 dsh **用户级配置面**的唯一真源（`settings.yaml` / `.credentials.yaml` /
-     * `.agent-presets/` / `skills/`），由 `ide.yml` patch 指向，所有项目共享；也是每项目
-     * DSH_HOME 的父目录（数据面仍按项目隔离）。
+     * 所有项目共用的配置根，也是每项目 DSH_HOME 的父目录（数据面仍按项目隔离）。
+     * dsh 0.2.1 起各配置面的落点：
+     * - 设置 / Agent 预设 → `<共享根>/profiles/web/cordis.patch.yml`（**共享 profile 内**，天然跨项目）；
+     * - 凭据 → `<共享根>/.credentials.yaml`（`ide.yml` 的 `- id: credentials` 指向）；
+     * - 用户技能 → `<共享根>/skills`（`ide.yml` 的 `- id: skill-filesystem` 指向）。
      *
      * 路径沿用 v0.1.3-dev 以来的全局根，避免丢失用户既有的语言偏好与内测声明接受状态。
      */
@@ -312,13 +325,34 @@ class DshHomeManager : Disposable {
             PathManager.getConfigDir().resolve("dsh-idea").resolve("dsh-home"),
         )
 
-    /** 共享设置文档：`<共享根>/settings.yaml`（dsh `dsh-settings-file` 的 `path`）。 */
+    /**
+     * 旧的共享设置文档：`<共享根>/settings.yaml`。
+     *
+     * **dsh 0.2.1 起它不再是长期配置文档**（`dsh-settings-file` 已移除）：首次启动时 dsh 会把
+     * `<DSH_HOME>/settings.yaml` 一次性导入进 profile 的 `cordis.patch.yml` 并改名为
+     * `settings.yaml.imported`。因此本路径现在的角色是**一次性导入源**
+     * （见 [migrateLegacySettings]），保留该访问器是为了迁移与日志。
+     */
     fun sharedSettingsPath(): Path = sharedConfigRoot().resolve(SharedConfigMigrator.SETTINGS_FILE)
+
+    /**
+     * dsh 0.2.1 起的配置真源：共享 profile 的 patch 层
+     * `<共享根>/profiles/web/cordis.patch.yml`（`dsh-config-editor.documentPath`）。
+     *
+     * 设置页只读展示用；`profiles` 已共享（[sharedProfilesRoot]），故该文件对全部项目生效。
+     */
+    fun sharedProfilePatchPath(): Path = sharedProfilesRoot().resolve("web").resolve("cordis.patch.yml")
 
     /** 共享凭据文档：`<共享根>/.credentials.yaml`（dsh `dsh-credentials-local` 的 `path`）。 */
     fun sharedCredentialsPath(): Path = sharedConfigRoot().resolve(SharedConfigMigrator.CREDENTIALS_FILE)
 
-    /** 共享 Agent 预设根：`<共享根>/.agent-presets`（dsh `dsh-agent-presets` 的 user root）。 */
+    /**
+     * 旧版共享 Agent 预设根：`<共享根>/.agent-presets`。
+     *
+     * **dsh 0.2.1 起不再被读取**：`agent-presets` 行已删除（改为 `agent-preset-registry`，其
+     * `Config` 只有 `default`/`selectedDefault`，没有 `roots`/`includeUserRoot`），Agent 预设改为
+     * profile 内的声明式行，随共享 profile 共享。保留访问器仅供设置页/迁移日志提示旧目录位置。
+     */
     fun sharedAgentPresetsRoot(): Path = sharedConfigRoot().resolve(".agent-presets")
 
     /** 共享用户技能根：`<共享根>/skills`（dsh `dsh-skill-filesystem` 的 `dshHome` 下 skills）。 */
@@ -408,7 +442,9 @@ class DshHomeManager : Disposable {
         writeIfAbsent(home.resolve(IDE_PATCH_FILE), "[]\n")
 
         cleanLegacyProjectHome(home)
-        prefillAcknowledgeWelcomeNotice()
+        // dsh 0.2.1：设置不再是共享 settings.yaml，而是"每项目首次启动时导入进共享 profile"。
+        // 必须在 migrateIfNeeded（把项目侧旧文档并进共享根）之后、dsh 启动之前完成。
+        migrateLegacySettings(home)
         migrateLegacySessions(home, projectPath)
         // 分段耗时：v0.2.5 用户反馈"刷新卡住"时靠它定位（迁移 187MB 的 profiles 实测仅 ~100ms，
         // 慢的往往不是这里，而是被误挂上来的重量级步骤，见 ensureProfileHome 注释）
@@ -463,7 +499,9 @@ class DshHomeManager : Disposable {
             Files.createDirectories(web)
             writeIfAbsent(web.resolve("package.json"), WEB_PROFILE_MANIFEST)
             writeIfAbsent(web.resolve("cordis.yml"), "[]\n")
-            writeIfAbsent(web.resolve("cordis.patch.yml"), "# 本层由插件通过 --patch 覆盖，不在此修改\n[]\n")
+            // 这一层是 dsh 的用户 patch 层，**dsh 自己会写**（0.2.1 起设置/Agent 预设由
+            // dsh-config-editor 持久化到这里）。仅在不存在时播种空列表，切勿覆盖。
+            writeIfAbsent(web.resolve("cordis.patch.yml"), "# dsh 的用户 patch 层（设置由 Web UI 写入本文件）；插件只做空列表播种\n[]\n")
             LOG.info(
                 "ensureProfileHome($projectPath): ${System.currentTimeMillis() - startedAt}ms " +
                     "shared=${profilesState(projectPath).shared}",
@@ -702,14 +740,25 @@ class DshHomeManager : Disposable {
         }
     }
 
-    /** 共享 `settings.yaml` 首次创建时预写 `ui-onboarding.welcomeNoticeVersion`（已存在则不覆盖）。 */
-    private fun prefillAcknowledgeWelcomeNotice() {
-        val f = sharedSettingsPath()
-        if (Files.exists(f)) return
-        runCatching {
-            writeUtf8(f, "ui-onboarding:\n  welcomeNoticeVersion: \"$WELCOME_NOTICE_VERSION\"\n")
-            LOG.info("prefilled shared settings.yaml welcomeNoticeVersion=$WELCOME_NOTICE_VERSION")
-        }.onFailure { LOG.warn("failed to prefill shared settings.yaml", it) }
+    /**
+     * 把旧配置搬成 dsh 0.2.1 的"待导入文档"：`<DSH_HOME>/settings.yaml`。
+     *
+     * **为什么需要**：0.2.1 移除了 `dsh-settings-file`，`settings.yaml` 不再是长期配置文档。
+     * `dsh-settings.importLegacyDocument()` 会在 Loader 就绪后把 `<DSH_HOME>/settings.yaml`
+     * **一次性**导入进 profile 的 `cordis.patch.yml`（由 `dsh-config-editor` 持久化），随后把原文件
+     * 改名 `settings.yaml.imported` 留档。因为 `<DSH_HOME>/profiles` 指向共享根，导一次即对所有
+     * 项目生效（`ui-onboarding` → `ui-settings-general`、`llm-pi-ai`/`locale` 等同名 entry）。
+     *
+     * 幂等由两种状态保证：`.imported` 已存在（已导入过）或目标文件已存在（本次启动会导入）。
+     * 两种情况都不再写入，避免把用户已在 Web UI 改过的设置重新覆盖回去。
+     */
+    private fun migrateLegacySettings(home: Path) {
+        val result = SharedConfigMigrator.importLegacySettingsInto(
+            home = home,
+            sharedRoot = sharedConfigRoot(),
+            welcomeNoticeVersion = WELCOME_NOTICE_VERSION,
+        )
+        LOG.info("settings import for $home: $result")
     }
 
     /**
@@ -717,12 +766,25 @@ class DshHomeManager : Disposable {
      *
      * 目标：`<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/mcp-ide-server.mjs`。
      * 该位置向上查找 `node_modules` 会命中 `<运行时根>/dsh/node_modules/`（dsh 自身依赖树，
-     * 含 `@modelcontextprotocol/sdk` 与 `zod`），因此**无需任何 junction**，且全局只有一份脚本。
+     * 含 `zod`，以及**由运行时构建额外装入的 `@modelcontextprotocol/sdk` 与 `express`**），
+     * 因此**无需任何 junction**，且全局只有一份脚本。
+     *
+     * ⚠️ **dsh 0.2.1 起 dsh 树不再自带 MCP SDK**（改用 `@modelcontextprotocol/client`），
+     * 故 [mcpDepsPresent] 必须为真，否则脚本 import 直接 ERR_MODULE_NOT_FOUND（工具静默全挂）。
+     * 新版运行时资产由 `scripts/build-runtime.mjs` 的 BRIDGE_DEPS 提供这两个包；
+     * `DSH_IDEA_RUNTIME` 指向的旧树/自定义树可能缺失 → 明确 warn，而不是静默降级。
      *
      * 注意：Node 的 ESM 解析**不越过 junction**（实测），所以脚本必须真正落在 dsh 树内部，
      * 不能靠"给运行时根建链接"来凑解析路径。
      */
     private fun ensureMcpServerScript(shared: Path) {
+        if (!mcpDepsPresent()) {
+            LOG.warn(
+                "the runtime tree at ${runtimeRoot()} does not provide @modelcontextprotocol/sdk/express; " +
+                    "the bundled $MCP_SERVER_SCRIPT cannot start and IDE MCP tools will be unavailable. " +
+                    "Download the runtime for dsh $DSH_VERSION again (or point DSH_IDEA_RUNTIME at a runtime built by scripts/build-runtime.mjs)."
+            )
+        }
         val resource = try {
             IdeBridgeResources.mcpServerScript()
         } catch (e: Exception) {
@@ -737,6 +799,15 @@ class DshHomeManager : Disposable {
         // 但 Web UI 与对话不受影响（DshBridgeManager 已容忍脚本缺失）。仅记日志。
         LOG.warn("failed to deploy $MCP_SERVER_SCRIPT into the runtime tree at $target; IDE MCP tools will be unavailable (shared=$shared)")
     }
+
+    /**
+     * 运行时树是否提供 MCP server 脚本所需的第三方依赖。
+     *
+     * 判定 `<运行时根>/dsh/node_modules/@modelcontextprotocol/sdk/package.json` 是否存在。
+     * `express` 与 `zod` 由 sdk 的 peer/自身依赖解析，sdk 在则整组可用（构建期已逐条断言）。
+     */
+    fun mcpDepsPresent(): Boolean =
+        Files.isRegularFile(runtimeRoot().resolve("dsh/node_modules/@modelcontextprotocol/sdk/package.json"))
 
     /** 写脚本（内容变化才写）；成功返回 true。 */
     private fun deployScript(resource: String, target: Path): Boolean = try {

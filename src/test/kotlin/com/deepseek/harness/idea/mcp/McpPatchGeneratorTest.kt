@@ -66,17 +66,28 @@ class McpPatchGeneratorTest {
         assertFalse(patch.contains("settings.yaml"))
         assertFalse(patch.contains("agent-presets"))
         assertFalse(patch.contains("skill-filesystem"))
+        assertFalse(patch.contains("credentials"))
+    }
+
+    /**
+     * dsh 0.2.1：`settings` 行改为 `@deepseek-ai/dsh-settings`（无 Config，`path` 被静默忽略），
+     * `agent-presets` 行已不存在（改了名字/Config）。两者再 patch 只会"看起来生效实则无效"
+     * （0.2.1 实测：`patch: entry "agent-presets" not found` 被 warn 跳过），故必须彻底不生成。
+     */
+    @Test
+    fun `never patches rows that dsh 0_2_1 dropped or ignores`() {
+        val patch = McpPatchGenerator.generate(8080, shared)
+        assertFalse(patch.contains("- id: settings"), "dsh 0.2.1 ignores the settings row config: $patch")
+        assertFalse(patch.contains("settings.yaml"), "settings.yaml is no longer a live settings document: $patch")
+        assertFalse(patch.contains("- id: agent-presets"), "the agent-presets row no longer exists: $patch")
+        assertFalse(patch.contains("includeUserRoot"), "agent-preset-registry has no includeUserRoot option: $patch")
+        assertFalse(patch.contains("trust: user"))
     }
 
     @Test
-    fun `redirects settings and credentials to the shared config root`() {
+    fun `redirects credentials to the shared config root`() {
         val patch = McpPatchGenerator.generate(8080, shared)
-        assertTrue(patch.contains("- id: settings"), "must patch the settings row: $patch")
         assertTrue(patch.contains("- id: credentials"), "must patch the credentials row: $patch")
-        assertTrue(
-            patch.contains("path: 'C:/Users/me/AppData/Roaming/JetBrains/IdeaIC2024.1/dsh-idea/dsh-home/settings.yaml'"),
-            "settings path must be the forward-slash shared root: $patch",
-        )
         assertTrue(
             patch.contains("path: 'C:/Users/me/AppData/Roaming/JetBrains/IdeaIC2024.1/dsh-idea/dsh-home/.credentials.yaml'"),
             "credentials path must be the forward-slash shared root: $patch",
@@ -84,31 +95,24 @@ class McpPatchGeneratorTest {
     }
 
     /**
-     * `dsh-agent-presets` 的 `Config.default` 是必填项，且 patch 是整份 config 替换 —— 未改字段必须重述。
-     * `includeUserRoot: false` 防止再叠加 `$DSH_HOME/.agent-presets`（那是按项目隔离的旧根）。
+     * 用户技能根 = `<dshHome>/skills`；项目根 `<项目>/.dsh/skills` 仍按项目（不在此 patch 中改动）。
+     *
+     * dsh 0.2.1 的 web 层把 `skill-filesystem` 行 `disabled: true`（预设接管技能发现），
+     * 只替换 `config` 会保留禁用 → 必须显式 `disabled: false` 才能让它作为部署级技能提供者注册。
      */
     @Test
-    fun `shares agent presets and restates required default`() {
-        val patch = McpPatchGenerator.generate(8080, shared)
-        assertTrue(patch.contains("- id: agent-presets"))
-        assertTrue(patch.contains("default: standard"), "Config.default is required and must be restated: $patch")
-        assertTrue(patch.contains("includeUserRoot: false"), "must not keep the per-project user root: $patch")
-        assertTrue(patch.contains("path: 'C:/Users/me/AppData/Roaming/JetBrains/IdeaIC2024.1/dsh-idea/dsh-home/.agent-presets'"))
-        assertTrue(patch.contains("trust: user"), "writable root must carry user trust")
-    }
-
-    /** 用户技能根 = `<dshHome>/skills`；项目根 `<项目>/.dsh/skills` 仍按项目（不在此 patch 中改动）。 */
-    @Test
-    fun `shares the personal skills root`() {
+    fun `shares the personal skills root and re-enables the disabled row`() {
         val patch = McpPatchGenerator.generate(8080, shared)
         assertTrue(patch.contains("- id: skill-filesystem"))
+        assertTrue(patch.contains("disabled: false"), "0.2.1 disables this row in the web layer: $patch")
         assertTrue(patch.contains("dshHome: 'C:/Users/me/AppData/Roaming/JetBrains/IdeaIC2024.1/dsh-idea/dsh-home'"))
     }
 
     @Test
     fun `escapes single quotes in the shared root`() {
         val patch = McpPatchGenerator.generate(8080, "/home/o'brien/.config/dsh-idea/dsh-home")
-        assertTrue(patch.contains("path: '/home/o''brien/.config/dsh-idea/dsh-home/settings.yaml'"), patch)
+        assertTrue(patch.contains("path: '/home/o''brien/.config/dsh-idea/dsh-home/.credentials.yaml'"), patch)
+        assertTrue(patch.contains("dshHome: '/home/o''brien/.config/dsh-idea/dsh-home'"), patch)
     }
 
     @Test
@@ -121,9 +125,7 @@ class McpPatchGeneratorTest {
     fun `strict variant keeps the shared config sections`() {
         val patch = McpPatchGenerator.generateStrict(4321, shared)
         assertTrue(patch.contains("failOnStartupError: true"))
-        assertTrue(patch.contains("- id: settings"))
         assertTrue(patch.contains("- id: credentials"))
-        assertTrue(patch.contains("- id: agent-presets"))
         assertTrue(patch.contains("- id: skill-filesystem"))
     }
 }

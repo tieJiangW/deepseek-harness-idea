@@ -7,11 +7,19 @@
 > **交接先看这一节**；实测细节见 [PROJECT_NOTES.md](./PROJECT_NOTES.md)，运行时细节见 [release-runtime.md](./release-runtime.md)，
 > 发布操作见 [RELEASE_PROCESS.md](./RELEASE_PROCESS.md)，上架文案见 [marketplace-listing.md](./marketplace-listing.md)。
 
-- **版本与产物**：插件 `0.2.5`（thin 默认，约 2MB）→ `build/distributions/deepseek-harness-idea-0.2.5.zip`
-- **内置运行时**：`@deepseek-ai/dsh@0.1.5-rc.2` + Node.js 22.23.2（唯一版本来源 `DshHomeManager.DSH_VERSION`）
+- **版本与产物**：插件 `0.2.6`（thin 默认，约 2MB）→ `build/distributions/deepseek-harness-idea-0.2.6.zip`
+- **内置运行时**：`@deepseek-ai/dsh@0.2.1-rc.2` + Node.js 22.23.2（唯一版本来源 `DshHomeManager.DSH_VERSION`；
+  运行时树额外装入 MCP bridge 依赖 `@modelcontextprotocol/sdk` + `express`）
 - **IDE 兼容**：`since-build=241` / `until-build=262.*`；已在 **2024.1.7（默认，含全部测试）/ 2024.3.2 / 2026.2**
   分别通过 `compileKotlin` + `compileTestKotlin`
-- **测试**：全部通过（**260 项**，含 4 个真实 dsh 冒烟：启动与端口 / workspace 注册与置顶 / MCP 工具链 / session 迁移）
+- **测试**：全部通过（**270 项**，含 4 个真实 dsh 0.2.1 冒烟：启动与端口 / workspace 注册与置顶 / MCP 工具链 + bridge 依赖解析 / session 迁移）
+- **v0.2.6 主题：dsh 运行时升级到 0.2.1-rc.2** ——
+  ① **MCP server 依赖缺口**（0.2.1 不再自带 `@modelcontextprotocol/sdk`/`express`）→ 运行时构建显式装入并在
+  构建冒烟逐条断言，冒烟测试 `assertEsmResolves` 作回归门；② **配置面迁移**：`settings` 行在 0.2.1 失效
+  （设置改由 profile 的 `cordis.patch.yml` 承担）、`agent-presets` 行已不存在、`skill-filesystem` 需补
+  `disabled: false`；③ 旧 `settings.yaml` 一次性导入（`.imported` 留档，跨项目仍共享）；
+  ④ `dsh plugin` 新增 `engines.dsh` 兼容闸门 → 安装器给出 `allow-version` 指引与诊断日志路径。
+  启动/鉴权/RPC/工作区/composer 契约**未变**，已全部复验。
 - **v0.2.5 主题：dsh 插件包"装一次、多项目生效"** ——
   ① 每项目的 `<DSH_HOME>/profiles` 链接到共享 profile 根（Windows junction / 其它平台符号链接），
   插件共享而数据面（会话/工作区/附件）仍按项目隔离；② 新增「DSH 插件」设置页 + 工具窗入口：
@@ -32,8 +40,17 @@
 - **v0.2.4**：GitHub Release id 391244240（11 资产）+ Marketplace update 1174317
 - **macOS 验证**：v0.2.4 已在 **macOS（Apple Silicon）** 由用户完成端到端实测（安装、启动、对话、MCP 工具链）
 - **⚠️ 本机环境注意**：`github.com:443` 不稳定（`api.github.com`、`uploads.github.com`、`plugins.jetbrains.com` 可达）；
-  `tooling/runtime-dev` 必须与 `DshHomeManager.DSH_VERSION` 一致（已对齐 0.1.5-rc.2，旧 0.1.1 树保存在
-  `tooling/runtime-dev/dsh-0.1.1-backup`），否则冒烟测试会以旧契约（点号 RPC、无 token）失败
+  `tooling/runtime-dev` 必须与 `DshHomeManager.DSH_VERSION` 一致（已对齐 **0.2.1-rc.2**，旧树保存在
+  `tooling/runtime-dev/dsh-0.1.5-backup` 与 `dsh-0.1.1-backup`），否则冒烟测试会以旧契约失败
+- **⚠️ Gradle 本机坑（v0.2.6 实测）**：沙箱/权限受限运行时 Gradle 会报
+  `Failed to load native library 'native-platform.dll'`（无法写 `GRADLE_USER_HOME/native`）→ 用完整权限运行，
+  或用全新的 `GRADLE_USER_HOME`（不要把 `caches/journal-1` 链接/共享给另一个进程，否则 `journal-1.lock` 拒绝访问）
+- **⚠️ 不要在用着运行时的时候跑 `gradle clean`**：`build/` 里同时放着 `runtime-<os>-<arch>/` 运行时树与
+  `runtime-*.zip` 产物，`clean` 会把它们一起删（v0.2.6 实测：clean 被中途打断后，正在被 IDE 里 dsh 进程使用的
+  运行时树被删成半截 → `@deepseek-ai/dsh/package.json` 丢失）。要么先关掉 IDE 里的 dsh，要么先删
+  `build/plugin-runtime` 之外的临时产物、用 `buildPlugin` 而不带 `clean`。若 `build/runtime-win-x64` 被进程锁住
+  无法重建，可另建目录（如 `build/runtime-0.2.1-rc.2-win-x64`）并让
+  `<config>/dsh-idea/runtime/<DSH_VERSION>` 这个 junction 指向它。
 - **下一步**：见 [v0.2.5-retrospective.md §6](./v0.2.5-retrospective.md) —— 优先 **P0 发布流程**（资产单一来源、
   token 校验/轮换）与 **P0 真实 IDE 手工验收 A1–A5**；随后 P1（UI 状态机抽纯类 + 平台测试、一键诊断包）、
   P2（registry 搜索、待生效标记、更新检查、残留清理、共享范围可视化）；技术债（Gradle IntelliJ 2.x）单独一轮
@@ -125,3 +142,4 @@
 | v0.2.3 | dsh 0.1.5-rc.2 升级与集成适配 + 五平台运行时（新增 macOS x64 / Linux arm64）+ 设置页与文件选择器修复；已发布 GitHub Release v0.2.3 与 JetBrains Marketplace（update 1171727，待审） | ✅ 完成（130 项测试通过） |
 | v0.2.4 | **dsh 配置共享化**（修复新模型/API Key/Agent 预设重启后消失）+ MCP 脚本零链接 + 一次性配置迁移 + `tooling/runtime-dev` 对齐 0.1.5-rc.2 + **修复"发送选中代码 / 日志一键解释 没反应"**（Lexical composer 注入，真实页面 CDP 实测）；已发布 GitHub Release v0.2.4（11 资产）与 JetBrains Marketplace（update 1174317，待审）；**macOS（Apple Silicon）实测通过** | ✅ 完成（**194 项测试全部通过**） |
 | v0.2.5 | **dsh 插件包跨项目共享**（每项目 `profiles` 链接到共享 profile 根 → 装一次所有项目生效；数据面隔离不变）+ **「DSH 插件」设置页/工具窗动作**（安装/卸载，自备私有 pnpm、备份回滚、规格校验）+ **安装过程反馈**（进度条 + 每秒用时 + 阶段 + 实时流式输出 + 静默心跳 + 可取消 + 绿✓/红✗ + IDE 通知 + 卸载 manifest 兜底 + 装完一键重启）+ 迁移与失败降级（不阻断 dsh 启动）；真实 dsh 冒烟验证"另一个项目启动即加载共享插件" | ✅ 完成（**260 项测试全部通过**） |
+| v0.2.6 | **dsh 运行时升级 0.1.5-rc.2 → 0.2.1-rc.2**（Node 22.23.2）+ 四处破坏性变更适配：① MCP server 依赖缺口（dsh 0.2.1 不再自带 `@modelcontextprotocol/sdk`/`express`）→ 运行时构建显式装入 + 双端断言（构建冒烟 + `assertEsmResolves`）；② `settings` 行失效 → 设置改由共享 profile 的 `cordis.patch.yml` 承担，旧 `settings.yaml` 一次性导入（`.imported` 留档）；③ `agent-presets` 行已不存在 → 预设随共享 profile；④ `skill-filesystem` 需显式 `disabled: false`；另：`dsh plugin` 的 `engines.dsh` 兼容闸门 → 安装器给出 `allow-version` 指引；**dsh Web 插件市场（0.2.1 新增）与插件页的 pnpm 版本统一**（私有 pnpm shim 前置进 dsh 子进程 PATH，修掉 `ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF` / `..._PUBLIC_HOIST_PATTERN_DIFF`）。启动/鉴权/RPC/工作区/composer 契约未变（全部复验） | ✅ 完成（**270 项测试全部通过**，含 4 项真实 dsh 0.2.1 冒烟） |

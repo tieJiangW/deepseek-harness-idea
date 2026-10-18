@@ -54,8 +54,8 @@ class DshBridgeManager(
     fun writePatch(): Path {
         val port = mcpPort
         require(port > 0) { "MCP server not ready" }
-        // 共享配置根（v0.2.4）：patch 把 dsh 的 settings / credentials / agent-presets / 用户技能
-        // 全部指向该目录（`- id: <rowId>` 整份覆盖形态），实现"配置共享 + 数据隔离"。
+        // 共享配置根（v0.2.4）：patch 仍重定向 dsh 的 credentials 与用户技能；设置/Agent 预设
+        // 自 dsh 0.2.1 起落在共享 profile 的 cordis.patch.yml，不再经 patch 重定向（见 McpPatchGenerator）。
         val sharedRoot = com.deepseek.harness.idea.runtime.DshHomeManager.getInstance().sharedConfigRoot().toString()
         val patch = McpPatchGenerator.generate(port, sharedRoot)
         val file = homeDir.resolve("ide.yml")

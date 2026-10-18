@@ -3,7 +3,7 @@
 //
 // 用法：
 //   node scripts/build-runtime.mjs [--os win32|darwin|linux] [--arch x64|arm64]
-//        [--node-version 22.23.2] [--dsh-version 0.1.5-rc.2]
+//        [--node-version 22.23.2] [--dsh-version 0.2.1-rc.2]
 //        [--output build/runtime-<os>-<arch>] [--registry <npm>] [--cache <dir>]
 //        [--bundle] [--force]
 //
@@ -14,6 +14,10 @@
 //     Unix 的 bin/node → node/node（工具链按 Platform.nodeBinName 取）。
 //   - dsh 树用目标 node 的 npm 安装到 <output>/dsh/，并传 --os/--cpu 使 optionalDependencies
 //     按目标平台解析（本机制影响 sharp/koffi 等原生依赖；CI 矩阵在各目标 OS 上构建最稳）。
+//   - **bridge 依赖（v0.2.6）**：除 dsh 之外还装 @modelcontextprotocol/sdk 与 express，
+//     供插件自带的 mcp-ide-server.mjs 解析——dsh 0.2.1 起其安装树不再包含这两个包
+//     （实测 0.2.1 树内 `@modelcontextprotocol/sdk` / `express` 缺失 → MCP 工具全失效）。
+//     安装后逐条断言可从 <output>/dsh/node_modules 解析，缺失即构建失败（不再静默降级）。
 //   - --bundle 时打包 runtime-<os>-<arch>.zip（根为 node/ + dsh/）并产出同名 .sha256 侧车。
 import { spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -35,10 +39,13 @@ function flag(name) { return args.includes('--' + name); }
 const osName = opt('os', process.platform);          // win32 | darwin | linux
 const arch = opt('arch', process.arch);               // x64 | arm64
 const nodeVersion = opt('node-version', '22.23.2');
-const dshVersion = opt('dsh-version', '0.1.5-rc.2');
-const output = opt('output', path.join(root, 'build', `runtime-${osId(osName)}-${arch}`));
+const dshVersion = opt('dsh-version', '0.2.1-rc.2');
+// 相对路径统一按仓库根解析成绝对路径：npm 会以 <output>/dsh 为 cwd 运行，
+// 相对 `--cache` 会被解析到该 cwd 下（曾经因此让 `--output tooling/runtime-dev` 的
+// 默认 cache 变成 …/dsh/tooling/… 并导致 npm install 失败）。
+const output = path.resolve(root, opt('output', path.join(root, 'build', `runtime-${osId(osName)}-${arch}`)));
 const registry = opt('registry', process.env.npm_config_registry || 'https://registry.npmmirror.com/');
-const cacheDir = opt('cache', path.join(output, '.npm-cache'));
+const cacheDir = path.resolve(root, opt('cache', path.join(output, '.npm-cache')));
 const nodeMirror = opt('node-mirror', 'https://registry.npmmirror.com/-/binary/node');
 const force = flag('force');
 const bundle = flag('bundle');
@@ -107,6 +114,42 @@ const dshDir = path.join(output, 'dsh');
 const dshBin = path.join(dshDir, 'node_modules/@deepseek-ai/dsh/lib/bin.js');
 const bundleZip = path.join(root, 'build', `runtime-${osId(osName)}-${arch}.zip`);
 
+/**
+ * 插件自带 MCP server（mcp-ide-server.mjs）所需的运行时依赖。
+ *
+ * dsh 0.1.5 的安装树里这两个包恰好是传递依赖（sdk@1.30.0 / express@5.2.1），
+ * 0.2.1 起 dsh 改用 `@modelcontextprotocol/client@2`，两者**都不再存在**（实测）。
+ * 因此必须由运行时显式提供，否则脚本 import 直接 ERR_MODULE_NOT_FOUND、六个 ide_* 工具失效。
+ *
+ * 版本钉在 0.1.5 树的实测可用组合：sdk 1.30.0 起；express 5.x 供 sdk 的
+ * `server/express.js`（`createMcpExpressApp`）使用。协议侧已实测：v1 SDK 服务端与
+ * dsh 0.2.1 的 v2 client 在 `failOnStartupError: true` 下握手/工具同步通过。
+ */
+const BRIDGE_DEPS = {
+  '@modelcontextprotocol/sdk': '^1.30.0',
+  express: '^5.2.1',
+};
+
+/** 供 mcp-ide-server.mjs import 的 specifier；构建后逐条断言可解析。 */
+const BRIDGE_MODULES = [
+  '@modelcontextprotocol/sdk/server/mcp.js',
+  '@modelcontextprotocol/sdk/server/streamableHttp.js',
+  '@modelcontextprotocol/sdk/server/express.js',
+  'zod/v4',
+];
+
+/**
+ * 断言每个 bridge specifier 都能从 <output>/dsh/node_modules 解析。
+ * ESM 的 `--input-type=module -e` 以 cwd 为解析基准，故 cwd 设为 dsh 目录。
+ */
+function verifyBridgeDeps(runner) {
+  for (const spec of BRIDGE_MODULES) {
+    const probe = `import(${JSON.stringify(spec)}).then(() => console.log('   ok ' + ${JSON.stringify(spec)}))`
+      + `.catch((e) => { console.error('   MISSING ' + ${JSON.stringify(spec)} + ': ' + e.code); process.exit(1); });`;
+    sh(runner, ['--input-type=module', '-e', probe], { cwd: dshDir });
+  }
+}
+
 async function main() {
   log(`DSH runtime build: node v${nodeVersion} + @deepseek-ai/dsh@${dshVersion} -> ${output}`);
   // fresh checkout 无 build/ 等目录：先确保存在（下载包写 build/ 上层、bundle 到 build/）
@@ -172,15 +215,27 @@ async function main() {
   }
 
   // ---- 2. dsh ----
+  // 已存在的树只有**版本一致**才复用：v0.2.6 实测踩过 —— 目录里是旧版 dsh（0.1.1/0.1.5）时脚本会
+  // 直接复用它并重新打包，产出"看着成功、实际是旧运行时"的资产；更糟的是旧树的传递依赖可能恰好
+  // 满足 bridge 断言，把版本漂移彻底掩盖掉。因此这里比对 package.json 版本，不一致就重装该子树。
+  let dshInstalled = false;
   if (fs.existsSync(dshBin) && !force) {
-    log('dsh exists, skip install');
     const pkgJson = path.join(dshDir, 'node_modules/@deepseek-ai/dsh/package.json');
-    if (fs.existsSync(pkgJson)) log(`   dsh ${JSON.parse(fs.readFileSync(pkgJson, 'utf8')).version}`);
-  } else {
+    const installed = fs.existsSync(pkgJson)
+      ? JSON.parse(fs.readFileSync(pkgJson, 'utf8')).version
+      : undefined;
+    if (installed === dshVersion) {
+      log(`dsh ${installed} exists, skip install`);
+      dshInstalled = true;
+    } else {
+      log(`dsh tree carries ${installed ?? 'an unknown version'} but ${dshVersion} was requested; reinstalling the dsh subtree`);
+    }
+  }
+  if (!dshInstalled) {
     log(`Install @deepseek-ai/dsh@${dshVersion}`);
     fs.rmSync(dshDir, { recursive: true, force: true });
     fs.mkdirSync(dshDir, { recursive: true });
-    fs.writeFileSync(path.join(dshDir, 'package.json'), JSON.stringify({ name: 'dsh-runtime', private: true, dependencies: { '@deepseek-ai/dsh': dshVersion } }, null, 2));
+    fs.writeFileSync(path.join(dshDir, 'package.json'), JSON.stringify({ name: 'dsh-runtime', private: true, dependencies: { '@deepseek-ai/dsh': dshVersion, ...BRIDGE_DEPS } }, null, 2));
     const npmCli = isCross ? hostNpmCli() : path.join(nodeDir, t.npmRel);
     if (!npmCli || !fs.existsSync(npmCli)) {
       throw new Error(isCross
@@ -200,7 +255,15 @@ async function main() {
   // ---- 3. Smoke ----
   log('Smoke verification');
   const dshPkgDir = path.resolve(dshDir, 'node_modules/@deepseek-ai/dsh');
-  sh(runnerNode ?? nodeExe, ['-e', `const p=require(process.argv[1]+'/package.json');console.log('   dsh '+p.version);`, dshPkgDir]);
+  const builtVersion = JSON.parse(fs.readFileSync(path.join(dshPkgDir, 'package.json'), 'utf8')).version;
+  // 版本硬断言：宁可构建失败，也不要打出一个"版本不对但看着成功"的运行时资产
+  if (builtVersion !== dshVersion) {
+    throw new Error(`runtime carries dsh ${builtVersion} but ${dshVersion} was requested (delete ${dshDir} or pass --force)`);
+  }
+  console.log(`   dsh ${builtVersion}`);
+  // bridge 依赖断言：dsh 0.2.1 树内已无 sdk/express，缺了 MCP 工具会静默全挂（见 BRIDGE_DEPS 注释）
+  log('Verify MCP bridge dependencies');
+  verifyBridgeDeps(runnerNode ?? nodeExe);
 
   // ---- 4. Bundle ----
   if (bundle) {

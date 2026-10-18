@@ -102,11 +102,12 @@ US-01～US-10 均有对应实现；其中 US-01/02/04/06/07/10 的**最终体验
 | # | 事项 | 说明 |
 |---|---|---|
 | C-1 | `org.jetbrains.intellij` 1.17.4 → 2.x（platform 线） | 2.x 未在本网络插件门户解析到且 DSL 不兼容（build.gradle 注释）；升级需回归全量构建 |
-| C-2 | dsh 版本升级流程 | 升级 = 改 `DSH_VERSION` + 重建（或交叉构建）运行时 + 回归启动/鉴权/RPC/patch 语法。**v0.2.3 已完成一次跨版本升级：0.1.1-rc.2 → 0.1.5-rc.2**（三处契约变更见 PROJECT_NOTES「dsh 0.1.5-rc.2 升级」）；当前锁定 **0.1.5-rc.2** |
+| C-2 | dsh 版本升级流程 | 升级 = 改 `DSH_VERSION` + 重建（或交叉构建）运行时 + 回归启动/鉴权/RPC/patch 语法 + **新增：核对运行时树里的插件依赖是否仍存在**。**v0.2.3 完成 0.1.1-rc.2 → 0.1.5-rc.2**，**v0.2.6 完成 0.1.5-rc.2 → 0.2.1-rc.2**（含 MCP SDK 缺口 / `settings` 行失效 / `agent-presets` 行不存在 / `skill-filesystem` 被禁用四处适配，见 PROJECT_NOTES「dsh 0.2.1-rc.2 升级」）；当前锁定 **0.2.1-rc.2** |
 | C-3 | 并发上限 3 → 单实例多工作区 | 多项目内存/端口优化方向；当前上限策略满足 MVP |
 | C-4 | `failOnStartupError` 仅测试形态 | 生产可用 `reconnect` 语义（patch 已含 reconnect maxAttempts 3） |
 | C-5 | 版本号口径不一致 | ✅ 已解决：v0.2.0 起按 0.2.x 发版对齐；**当前插件版本 0.2.3（2026-09-16）**，已发布 GitHub Release（11 资产）与 Marketplace（update 1171727） |
 | C-6 | 杀软白名单说明未成文 | PRD §9 提及"文档说明加白名单"；用户文档层缺失，可并入插件 description 或随 A-1 安装文档补充 |
+| C-7 | 私有 pnpm 9.15.9 → 11.x（**独立变更，用户已确认不在 v0.2.6 做**） | 现状：dsh 0.2.1 的构建审批把 `allowBuilds` 写进 `pnpm-workspace.yaml`，但**实测 pnpm 9.15.9 根本不读该文件里的设置**（同一份 `virtualStoreDirMaxLength`，9 静默忽略、11 据此报 DIFF）→ 需要 postinstall 的原生插件可能"装了没构建"，且"批准构建"按钮点了无效。v0.2.6 只做"两条入口用同一个 pnpm"（PATH 注入），**零迁移**保稳定。升级 11 需：① 改 `PNPM_VERSION`；② 启动时按 `.modules.yaml#packageManager` 检测并把 `node_modules` 改名备份 → `pnpm install` → 成功删备份/失败回滚；③ 补写 `pnpm-workspace.yaml`（dsh 模板）；④ 回归两条安装链 + `link:` 规格 + 原生插件 + 关闭 `shareDshProfiles` 的多 profile 场景。详见 PROJECT_NOTES「ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF」 |
 
 ### D. 文档债（本次评审发现，随本评审已修复）
 
@@ -131,7 +132,13 @@ US-01～US-10 均有对应实现；其中 US-01/02/04/06/07/10 的**最终体验
 - **v0.2.2（2026-09-03）**：修复 IntelliJ 2024.x 启动报 `contains invalid plugin descriptor`——根因是 `plugin.xml`
   根级 `<icon>` 不被 2024.x 描述符解析器识别（`Unknown element: icon` → 启动期 `Logger.error` 抛异常）；
   移除该元素即可，工具窗口/动作的子元素 `icon=` 属性不受影响。测试 122/122 保持通过。
-- **v0.2.3（2026-09-16，当前）**：dsh 运行时 **0.1.1-rc.2 → 0.1.5-rc.2**（Node 22.23.2）+ 三处契约适配
+- **v0.2.6（2026-11-20，当前）**：dsh 运行时 **0.1.5-rc.2 → 0.2.1-rc.2**（Node 22.23.2）。启动/鉴权/RPC/工作区/
+  composer 契约**未变**（已复验）；四处破坏性变更已适配：① 0.2.1 安装树不再自带 `@modelcontextprotocol/sdk`/`express`
+  → 运行时构建 `BRIDGE_DEPS` 显式装入 + 构建断言 + 冒烟 `assertEsmResolves` 回归门；② `settings` 行改为无 Config 的
+  `dsh-settings`（设置改由 profile 的 `cordis.patch.yml` 承担）→ 旧 `settings.yaml` 一次性导入（`.imported` 留档）；
+  ③ `agent-presets` 行已不存在 → 预设随共享 profile；④ `skill-filesystem` 需 `disabled: false`。
+  另适配 `dsh plugin` 的 `engines.dsh` 兼容闸门（安装器给出 `allow-version` 指引与诊断日志路径）。测试 **270/270**。
+- **v0.2.3（2026-09-16）**：dsh 运行时 **0.1.1-rc.2 → 0.1.5-rc.2**（Node 22.23.2）+ 三处契约适配
   （启动 URL 浏览器鉴权 token→cookie；RPC 斜杠命名空间 + `{"payload":{"args":{"request":…}}}` 信封；
   `workspace/list` 移除 → 工作区顺序改读 `storages/workspace.json` v2）；**五平台运行时**（新增 macOS x64 与 Linux arm64，
   `build-runtime.mjs` 支持在 Windows 上交叉构建 Unix 运行时——符号链接容错 / 主机 node 执行 npm / `--libc glibc`）；

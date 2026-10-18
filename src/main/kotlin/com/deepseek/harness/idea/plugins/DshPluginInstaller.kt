@@ -137,6 +137,34 @@ internal object DshPluginInstaller {
     fun pnpmCli(toolsDir: Path): Path = toolsDir.resolve("node_modules/pnpm/bin/pnpm.cjs")
 
     /**
+     * 启动 dsh 前**对齐**私有 pnpm shim 并返回其目录（**不联网**）；私有 pnpm 尚未准备 → null。
+     *
+     * **为什么需要它**：dsh 0.2.1 的 Web UI 插件市场（`@deepseek-ai/dsh-plugin-manager`）默认执行
+     * `execa("pnpm")`，即取 **dsh 子进程 PATH 上的 pnpm**；插件的「DSH 插件」页用的是这里的私有 pnpm。
+     * 两者大版本不同时，会互相拒绝同一个 `node_modules`（v0.2.6 实测：私有 pnpm **9.15.9** 建的树被
+     * PATH 上 pnpm **11.22.0** 拒绝，先后报 `ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF` 与
+     * `ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF`；**只钉单个设置不够** —— 两个大版本的默认值有多处不同，
+     * 且 `.modules.yaml` 会逐项校验）。故启动 dsh 时把这个目录**前置**进子进程 PATH
+     * （见 [com.deepseek.harness.idea.runtime.DshProcessManager]），两条入口即用同一个 pnpm。
+     *
+     * **为什么顺便重写 shim**：shim 里写死了 node 的**绝对路径**，而 [ensurePnpm] 在
+     * "pnpm cli + shim 都在"时直接复用（避免重复联网）。插件升级到新 dsh 版本后，旧 shim 会指向旧运行时
+     * 的 node（可能已被删除）→ 前置进 PATH 反而会把 dsh 的 pnpm 解析成一个坏脚本。这里用**当前**运行时
+     * 的 node 重写一遍（纯文本写，毫秒级）。
+     */
+    fun syncShimForRuntime(sharedRoot: Path, nodeExe: Path): Path? {
+        val tools = toolsDir(sharedRoot)
+        val cli = pnpmCli(tools)
+        if (!Files.isRegularFile(cli)) return null
+        val shim = shimDir(sharedRoot)
+        val os = Platform.current().os
+        val shimFile = shim.resolve(shimName(os))
+        runCatching { writeShim(shimFile, nodeExe, cli, os) }
+            .onFailure { LOG.warn("failed to sync the private pnpm shim at $shimFile", it) }
+        return if (Files.isRegularFile(shimFile)) shim else null
+    }
+
+    /**
      * `dsh plugin` 的子命令参数（`plugin` 是 dsh bin 的子命令，不是 pnpm 的）。
      *
      * [quoteSpec] 为真时把包规格包进双引号：Windows 上 dsh 用 `shell: true` 转发，`cmd` 会把
@@ -203,6 +231,36 @@ internal object DshPluginInstaller {
         val file = projectHome.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME).resolve(DshProfileManifest.FILE_NAME)
         if (!Files.isRegularFile(file)) return DshProfileManifest.Profile.EMPTY
         return DshProfileManifest.parse(runCatching { Files.readString(file, StandardCharsets.UTF_8) }.getOrNull())
+    }
+
+    /**
+     * dsh 0.2.1 起新增的"插件版本与运行时版本不兼容"提示行（`@deepseek-ai/dsh-plugin-manager`）：
+     * `dsh: to accept the risk, run: dsh plugin --profile web allow-version <pkg>@<ver> --dsh-version <ver> --accept-risk`
+     */
+    private val INCOMPATIBLE_VERSION_HINT = Regex("""to accept the risk, run:\s*(\S.*?)\s*$""", RegexOption.MULTILINE)
+
+    /** dsh 0.2.1 起失败时给出的完整诊断日志路径：`dsh: plugin command failed; diagnostics: <path>`。 */
+    private val DIAGNOSTICS_PATH = Regex("""plugin command failed; diagnostics:\s*(\S.*?)\s*$""", RegexOption.MULTILINE)
+
+    /**
+     * 给失败输出补两条"接下来怎么办"的说明（纯函数，可单测；解析不到则不补）。
+     *
+     * 0.2.1 的 `dsh plugin` 有两类新信息只出现在 stderr：
+     * - **版本兼容闸门**：不兼容的插件会被拒绝，并打印可复制执行的 `allow-version … --accept-risk`；
+     *   用户看到 exit≠0 时不知道这是"版本不兼容"而不是"网络失败"，必须点明；
+     * - **诊断日志路径**：完整命令输出落在该文件里，报障时要能直接找到。
+     */
+    fun failureNotes(output: String): List<String> {
+        val notes = ArrayList<String>()
+        INCOMPATIBLE_VERSION_HINT.find(output)?.let { match ->
+            notes += "note: this plugin version is not compatible with the running dsh runtime, so dsh refused it. " +
+                "If you trust the package, run the command below (also printed in the output above) and retry:\n  " +
+                match.groupValues[1].trim()
+        }
+        DIAGNOSTICS_PATH.find(output)?.let { match ->
+            notes += "note: the full command diagnostics were written to ${match.groupValues[1].trim()}"
+        }
+        return notes
     }
 
     /** 用某项目的 profile manifest 文本解析（供 UI 直接喂文本，避免重复读盘）。 */
@@ -331,14 +389,18 @@ internal object DshPluginInstaller {
                     }
                 }
                 restoreProfile(backup, profileDir)
+                // 0.2.1 的新语义：失败可能是"插件与运行时版本不兼容"（需 allow-version），
+                // 或 dsh 已把完整输出写进诊断文件。两者都要转成用户能照做的下一步。
+                val notes = failureNotes(output)
+                val report = if (notes.isEmpty()) output else output + "\n\n" + notes.joinToString("\n")
                 // 失败输出必须进日志：UI 可能被模态挡住（历史事故），日志是唯一的兜底证据。
                 LOG.warn(
                     "dsh plugin $action failed (exit=$code) for $profileDir; profile manifest restored; output tail:\n" +
-                        output.takeLast(3000),
+                        report.takeLast(3000),
                 )
                 return outcome(
                     ok = false,
-                    output = output,
+                    output = report,
                     profile = readProfile(projectHome),
                     failure = when (code) {
                         TIMEOUT_EXIT -> Failure.TIMEOUT

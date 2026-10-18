@@ -197,16 +197,20 @@ Linux 的原生依赖变体带 libc 后缀：`node-addon-require-builtin-linux-x
 
 **现状**：插件的运行时下载地址用 `{version}` = **插件版本**，即默认
 `https://github.com/tieJiangW/deepseek-harness-idea/releases/download/v{version}/runtime-<os>-<arch>.zip`。
-运行时缓存目录按 `DSH_VERSION`（`DshHomeManager.DSH_VERSION`，如 `0.1.5-rc.2`）命名，
+运行时缓存目录按 `DSH_VERSION`（`DshHomeManager.DSH_VERSION`，如 `0.2.1-rc.2`）命名，
 `RuntimeProvisioner.isPresent(runtimeRoot())` 短路保证**已装好运行时的老用户在插件版本升级后不重新下载**。
 
 **改进方向**：把下载 URL 的 `{version}` 从「插件版本」改为「**DSH 运行时版本**」，`runtime-assets.json` 的
 `baseUrl` 改用 `v{dshVersion}` 占位，并把各平台运行时 zip 挂到一个**按 DSH 版本命名的稳定 tag**（如
-`v0.1.5-rc.2`）。这样无论插件版本怎么变，只要 `DSH_VERSION` 常量不变，新装用户与老用户都指向
+`v0.2.1-rc.2`）。这样无论插件版本怎么变，只要 `DSH_VERSION` 常量不变，新装用户与老用户都指向
 **同一个运行时下载地址** —— 不再需要随每个插件版本重复上传运行时，也不需要重新下载。
 
-**前置（发布动作，未执行）**：需新建 `v0.1.5-rc.2`（或对应 DSH 版本）Release 并挂载各平台
-`runtime-<os>-<arch>.zip` + `.sha256`（文件已在 `release-assets/` 可复现）。当前 v0.2.1 仍以插件版本为下载源，**未改动**。
+**前置（发布动作，未执行）**：需新建 `v0.2.1-rc.2`（或对应 DSH 版本）Release 并挂载各平台
+`runtime-<os>-<arch>.zip` + `.sha256`（文件已在 `release-assets/` 可复现）。当前 v0.2.6 仍以插件版本为下载源，**未改动**。
+
+> ⚠️ **v0.2.6 起运行时 zip 还包含 MCP bridge 依赖**（`@modelcontextprotocol/sdk` + `express`）：
+> dsh 0.2.1 的安装树不再自带它们，漏装会让 `ide_*` 工具静默全挂。构建脚本已加断言，五平台资产必须
+> **重新构建并同时替换 `.sha256`**（旧 zip 不能沿用）。
 
 ### 7.2 其它预留
 

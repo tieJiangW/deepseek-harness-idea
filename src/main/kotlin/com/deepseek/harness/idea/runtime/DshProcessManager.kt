@@ -30,6 +30,15 @@ class DshProcessManager(
     private val extraEnv: Map<String, String> = emptyMap(),
     /** 项目根目录绝对路径（用于启动后注册默认工作区，FR-04.2）。 */
     private val projectPath: String = "",
+    /**
+     * 需要**前置**进 dsh 子进程 PATH 的目录（v0.2.6）。
+     *
+     * 目前只放插件的私有 pnpm shim 目录：dsh 0.2.1 的 Web UI 插件市场用 PATH 上的 `pnpm`，
+     * 而插件的「DSH 插件」页用私有 pnpm；版本不同会在同一个 `node_modules` 上互相拒绝
+     * （`ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF` / `ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF`）。
+     * 前置后两条入口用同一个 pnpm；为空则退回用户 PATH（日志说明）。
+     */
+    private val pathPrependDirs: List<File> = emptyList(),
 ) : Disposable {
 
     enum class State { STOPPED, STARTING, RUNNING, CRASHED }
@@ -117,6 +126,15 @@ class DshProcessManager(
         pb.directory(workDir)
         pb.environment()["DSH_HOME"] = homeDir.absolutePath
         extraEnv.forEach { (k, v) -> pb.environment()[k] = v }
+        // v0.2.6：让 dsh 的 Web UI 插件市场用**与插件共同的那份 pnpm**（见 pathPrependDirs 注释）。
+        if (pathPrependDirs.isEmpty()) {
+            LOG.info("no private pnpm prepared; dsh web plugin installs will use the pnpm found on PATH")
+        } else {
+            pathPrependDirs.forEach { dir ->
+                prependPath(pb.environment(), dir)
+                LOG.info("prepended ${dir.absolutePath} to the dsh child PATH (shared pnpm)")
+            }
+        }
         pb.redirectErrorStream(true)
 
         val p = try {
@@ -264,6 +282,23 @@ class DshProcessManager(
         val handle = ProcessHandle.of(pid).orElse(null) ?: return
         handle.descendants().forEach { runCatching { it.destroyForcibly() } }
         runCatching { handle.destroyForcibly() }
+    }
+
+    /**
+     * 把 [dir] 前置进子进程 PATH（纯 JDK，不依赖平台差异）。
+     *
+     * Windows 的环境变量名大小写不敏感（`System.getenv()` 里常见 `Path`），而
+     * `ProcessBuilder.environment()` 里可能同时存在 `Path` 与 `PATH` 两份键 —— 这里统一成一份 `PATH`，
+     * 避免"到底哪份生效"不确定（同 [com.deepseek.harness.idea.plugins.DshPluginInstaller.withShimPath]）。
+     */
+    private fun prependPath(env: MutableMap<String, String>, dir: File) {
+        val existing = env.entries.firstOrNull { it.key.equals("PATH", ignoreCase = true) }?.value.orEmpty()
+        env.keys.removeIf { it.equals("PATH", ignoreCase = true) }
+        env["PATH"] = if (existing.isEmpty()) {
+            dir.absolutePath
+        } else {
+            dir.absolutePath + File.pathSeparator + existing
+        }
     }
 
     private fun setState(newState: State) {

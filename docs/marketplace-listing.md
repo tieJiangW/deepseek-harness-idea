@@ -1,8 +1,9 @@
-# JetBrains Marketplace 上架填写（当前版本 v0.2.5）
+# JetBrains Marketplace 上架填写（当前版本 v0.2.6）
 
-> 上传 `build/distributions/deepseek-harness-idea-0.2.5.zip` 时按此填写。
+> 上传 `build/distributions/deepseek-harness-idea-0.2.6.zip` 时按此填写。
 > Name / Description / Change-notes 会自动从 jar 内 `plugin.xml` 带入；此处为**额外字段**的建议值。
-> 历史：v0.2.3 → update 1171727；v0.2.4 → update 1174317；**v0.2.5 → update 1197216**（2026-10-18 上传，HTTP 201，`approve=false` 待审）。
+> 历史：v0.2.3 → update 1171727；v0.2.4 → update 1174317；v0.2.5 → update 1197216（2026-10-18 上传，HTTP 201，`approve=false` 待审）。
+> **v0.2.6：先只发布 GitHub Release，Marketplace 暂不上传**（等你决定后再按本文提交）。
 
 ## 基本信息
 
@@ -10,7 +11,7 @@
 | --- | --- |
 | **Plugin ID** | `com.deepseek.harness.idea`（自动带入） |
 | **Name** | `DeepSeek Harness`（自动带入） |
-| **Version** | `0.2.5`（自动带入） |
+| **Version** | `0.2.6`（自动带入） |
 | **Vendor** | `DeepSeek Harness Dev`（自动带入；`url=https://github.com/tieJiangW/deepseek-harness-idea`） |
 | **Source code URL** | `https://github.com/tieJiangW/deepseek-harness-idea` |
 | **License** | MIT（粘贴 `LICENSE` 文本或填上面的 LICENSE 链接） |
@@ -23,12 +24,21 @@
 - EN：`DeepSeek Harness AI agent workbench inside IntelliJ IDEA — embedded chat, MCP IDE context, shared config and one-click dsh plugin installs across projects.`
 - ZH：`把 DeepSeek Harness 智能体工作台嵌入 IntelliJ IDEA：内嵌对话、MCP 取用 IDE 上下文、配置与 dsh 插件跨项目共享（装一次全项目生效）。`
 
-## 本版重点（v0.2.5）
+## 本版重点（v0.2.6）
 
-- **dsh 插件跨项目共享**：每项目 `profiles` 链接到统一共享 profile，装一次所有项目加载；数据面（会话/工作区/附件）仍按项目隔离。
-- **「DSH 插件」设置页**：列出已装插件与纯依赖，按包名/版本范围或本地目录安装、选中卸载；无需全局 pnpm（自备私有 pnpm）。
-- **过程可见 + 一键生效**：阶段文案、进度条、每秒用时、实时输出、静默提示、可取消；结束绿 ✓ / 红 ✗ + IDE 通知；成功后直接「立即重启 Harness」。
-- **健壮兜底**：manifest 备份/回滚；卸载遇文件占用时降级为 manifest 级移除；`node_modules` 与 pnpm 配置不一致时自动对齐或隔离重建。
+- **运行时升级到 DeepSeek Harness 0.2.1-rc.2**（Node.js 22.23.2）。启动命令、浏览器鉴权 token→cookie、工作区 RPC、
+  存储布局与 composer 注入契约**均未变化**，并已对真实运行时复验。
+- **IDE 的 MCP 工具继续可用**：dsh 0.2.1 不再自带 `@modelcontextprotocol/sdk`/`express`（其 MCP 客户端改用
+  `@modelcontextprotocol/client`），若不处理会让 7 个 `ide_*` 工具**静默全挂**。现由运行时构建显式装入并在构建期
+  断言可解析，坏运行时无法发布。
+- **配置仍跨项目共享**：dsh 0.2.1 把用户设置从 `settings.yaml` 移到 profile 的 `cordis.patch.yml`；
+  既有设置会一次性迁移（原文件留档 `settings.yaml.imported`），导入一次即对所有项目生效。
+- **在 dsh 自带的 Web 插件市场里安装插件也能用了**：插件把私有 pnpm 前置进 dsh 子进程 PATH，避免"市场用 PATH 上的
+  pnpm、插件页用私有 pnpm"两版本互相拒绝同一个 `node_modules`（`ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF`）。
+- **插件安装失败有明确指引**：dsh 0.2.1 会做 `engines.dsh` 兼容判定，被拒时插件会给出可直接执行的
+  `allow-version … --accept-risk` 命令与 dsh 诊断日志路径。
+- **运行时资产变大属正常**：dsh 0.2.1 新增了 office/voice 等重依赖，单平台运行时约 **255–286 MB**（此前约 104 MB），
+  首次使用需联网下载一次（SHA-256 校验后离线复用）。
 
 ## 数据收集声明（AI 插件审核重点）
 

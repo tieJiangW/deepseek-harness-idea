@@ -2,7 +2,12 @@
 
 > 本文汇总 DeepSeek Harness IDEA 插件开发过程中的**实测环境事实、踩坑记录、dsh 行为结论**，
 > 供后续任务（Step 6 评审及之后的维护/升级）直接参考，避免重复调查。
-> 最后更新：2026-09-18（**v0.2.4 已发布**，插件版本 **0.2.4**：GitHub Release `v0.2.4`（id 391244240，11 资产）
+> 最后更新：2026-11-20（**dsh 运行时升级 0.1.5-rc.2 → 0.2.1-rc.2**，插件版本 **0.2.6**：MCP server 依赖缺口
+> （dsh 0.2.1 不再自带 `@modelcontextprotocol/sdk`/`express`，改由运行时构建注入并在冒烟断言）、配置面迁移
+> （`settings` 行失效 → 设置改由 profile 的 `cordis.patch.yml` 承担 + 旧 `settings.yaml` 一次性导入；
+> `agent-presets` 行不存在；`skill-filesystem` 需补 `disabled: false`）、`dsh plugin` 新增 `engines.dsh` 兼容闸门；
+> 全量测试 **270 项通过 / 0 失败 / 0 跳过**（含 4 项真实 dsh 0.2.1 冒烟）。详见「dsh 0.2.1-rc.2 升级」章节）
+> 上次更新：2026-09-18（**v0.2.4 已发布**，插件版本 **0.2.4**：GitHub Release `v0.2.4`（id 391244240，11 资产）
 > + JetBrains Marketplace update **1174317**（待审）+ **macOS（Apple Silicon）端到端实测通过**。
 > 发布前凭据自检通过：`scripts/secret-audit.mjs` 扫描仓库 91 个文本文件 / 24 条提交信息 / Release 正文 / 本地工作区，均无凭据。
 > 背景：① 删除 `copyGlobalConfigTo`（启动覆盖项目配置 = 新模型/语言丢失根因）；patch 改
@@ -33,7 +38,7 @@
 | 运行时开发目录 | `tooling/runtime-dev`（`DSH_IDEA_RUNTIME` 指向它）；`build/runtime` 是构建产物（含 bundle） |
 | 自动化沙箱 | pwsh 沙箱拦截工作区外读写与部分出站网络 → **gradle/npm 命令需完整沙箱权限**（仅自动化环境；用户本机无此限制） |
 | 一键打包 | `scripts/build-plugin.bat`（双击；自动探测 JBR/Gradle 缓存，`--no-daemon`，输出产物路径） |
-| 版本号 | 插件版本 = `build.gradle.kts` 第 13 行 `version`；`DshHomeManager.DSH_VERSION`（= dsh 运行时版本 `0.1.5-rc.2`，决定生产运行时目录名；勿随意改，升级=重建运行时） |
+| 版本号 | 插件版本 = `build.gradle.kts` 第 14 行 `version`；`DshHomeManager.DSH_VERSION`（= dsh 运行时版本 `0.2.1-rc.2`，决定生产运行时目录名；勿随意改，升级=重建运行时） |
 | 前向编译检查 | `tooling\gradle-8.14\bin\gradle.bat compileKotlin --no-daemon -PplatformVersion=2026.2`（下载 ideaIC 2026.2 约 1.5GB 到 Gradle 缓存；新平台自带 Kotlin 模块 metadata 高于 2.0.21，已加 `-Xskip-metadata-version-check`；JCEF 自 2026.2 起拆分为内置插件 `com.intellij.modules.jcef`，检查时需列入 `plugins`） |
 
 ### 常用命令（自动化环境需完整权限）
@@ -425,6 +430,158 @@ Kotlin 会要求 `override` 且语义完全相反；实现里叫 `cancelOperatio
   适配方向：改走 contenteditable（`document.execCommand('insertText')` + Enter 派发），**须在真实 JCEF 页面验证后**再改。
 - 其余未变（实测）：`--profile web` / `--patch` / `--host` / `--port` / `--no-open` 启动参数、端口行前缀 `dsh web: `、
   `lib/bin.js` 入口、profile bundle（`dsh-base` + `dsh-web-app`）、`welcomeNoticeVersion` 常量值 `2026-08-13.1`（与插件常量一致，无需改）。
+
+### dsh 0.2.1-rc.2 升级（v0.2.6：MCP SDK 缺口 + 配置面迁移，全部实测）
+
+**升级方式**：改 `DshHomeManager.DSH_VERSION` / `build.gradle.kts` `dshVersion` / `scripts/build-runtime.{mjs,ps1}` 默认值 → 重建运行时（`tooling/runtime-dev` 与五平台 zip）→ 跑真实 dsh 冒烟。
+
+**先说结论（实测，非推测）**——启动与交互链路**没有**破坏性变更：
+
+| 契约 | 结论 |
+|---|---|
+| `bin.js` 自执行（`import.meta.main`） | Node 22.23.2 支持（`typeof === 'boolean'`）；0.1.5 本就同样写法 |
+| 插件命令行 `--profile web --patch <ide.yml> --host/--port/--no-open` | 正常，打印 `dsh web: http://127.0.0.1:<port>/?token=…`（实测两次：53527 / 53592） |
+| `GET /?token=` → 303 + `Set-Cookie: dsh-auth-…`；无 cookie → 401 | 未变（`COOKIE_PREFIX` 同名，`authorizeIndex` 仍 303） |
+| gateway 信封 `payload={args:{request:{…}}}` | 未变（`dsh-api-gateway` 仍校验"恰好一个 plain-object args"） |
+| `workspace/create` / `workspace/insertBefore` | 未变；`workspace/list` 仍不存在 |
+| `storages/workspace.json` | 未变（`name:"workspace", version:2, global.workspaceIds`） |
+| composer 注入契约 | 未变（`data-lexical-editor` / `data-lexical-text` / `data-composer-text-ref` / `input.send`="Send message"/"发送消息"） |
+| `mcp-client` Config | 未变（`streamable-http` / `serverName` / `toolCallTimeoutMs` / `failOnStartupError` / `reconnect`） |
+| profile 模板 bundles | 未变（`web = [dsh-base, dsh-web-app]`，故 `WEB_PROFILE_MANIFEST` 不动） |
+| 凭据文档 | 未变（`version:1` + `refs`/`records`，扁平 layout 仍内联升级） |
+
+**四处破坏性变更**（前三处是"静默失效"，最危险）：
+
+1. **MCP server 依赖缺失（P0）**：`dsh-mcp-client@0.2.1` 改用 `@modelcontextprotocol/client@2.2.0`，
+   安装树里**没有** `@modelcontextprotocol/sdk`/`express`（0.1.5 是恰好存在的传递依赖）。
+   实测从 `<runtime>/dsh/node_modules` 解析：三个 SDK specifier 全 `ERR_MODULE_NOT_FOUND`，`zod/v4` 正常
+   → `mcp-ide-server.mjs` 起不来，7 个 `ide_*` 工具全失效（且只记一条 error 日志，UI 无感）。
+   **解法**：`scripts/build-runtime.mjs` 的 `BRIDGE_DEPS`（`@modelcontextprotocol/sdk ^1.30.0` +
+   `express ^5.2.1`）与 dsh 同装进 `<runtime>/dsh/node_modules`，构建冒烟**逐条断言**四个 specifier 可解析。
+   **协议兼容已实测**：用 0.1.5 的 v1 SDK 起服务端、0.2.1 的 v2 client 连接，`failOnStartupError: true`
+   下 dsh 正常启动（连接 + 工具同步成功）→ 不需要重写协议。
+2. **`- id: settings` 失效**：0.2.1 的 `settings` 行改为 `@deepseek-ai/dsh-settings`（抽象 seam，**无 Config**），
+   `dsh-settings-file`（`Config{path,dshHome}`）被移除 → 插件指向共享 `settings.yaml` 的 `path`
+   被**静默忽略**（`--dump-config` 退出 0、无警告）。设置真源改为 **profile 的 `cordis.patch.yml`**
+   （`dsh-config-editor.documentPath = profileContext.patchPath`），旧 `<DSH_HOME>/settings.yaml` 由
+   `dsh-settings.importLegacyDocument()` 一次性导入后改名 `.imported`
+   （section→entry 映射：`ui-onboarding`→`ui-settings-general`、`ui-developer-tools`→`ui-settings`、
+   `shell`→`pwsh-sandbox`/`bash-sandbox`）。
+   **解法**：不再 patch 该行；`DshHomeManager.migrateLegacySettings` → `SharedConfigMigrator.importLegacySettingsInto`
+   把 `<共享根>/settings.yaml` **复制**成 `<DSH_HOME>/settings.yaml`（幂等：`.imported` 存在即跳过；
+   目标已存在则只补缺失的 `ui-onboarding` 段），并补写 `WELCOME_NOTICE_VERSION`（0.2.1 = `2026-09-28.1`）。
+   因为 v0.2.5 已把 `profiles` 链接到共享根，**导入一次即对所有项目生效**。
+3. **`- id: agent-presets` 失效**：该行已删除，改为 `agent-preset-registry`
+   （`Config{default,selectedDefault}`，**没有** `roots`/`includeUserRoot`）。实测 `--dump-config` 只打
+   `patch: entry "agent-presets" not found` 并跳过（非致命，但共享预设根随之失效）。
+   **解法**：不再 patch；0.2.1 的 Agent 预设是 `presets/*.patch.yml` 里的声明式行（`config.plugins`），
+   由 Web 预设编辑器写进共享 profile 的 patch 层 → 天然共享。`<共享根>/.agent-presets` 保留但不再被读取。
+4. **`skill-filesystem` 被 web 层禁用**：0.2.1 的 web overlay 把它 `disabled: true`（预设接管技能发现），
+   只替换 `config` 会**保留禁用** → 共享技能不注册。
+   **解法**：patch 追加 `disabled: false`，恢复"部署级技能提供者"的全局注册
+   （项目级 `<项目>/.dsh/skills` 不受影响）。
+
+**其他适配**：
+- `dsh plugin` 新增 `engines.dsh` 兼容闸门与 `allow-version`/`revoke-version`/`version-exemptions` 子命令；
+  失败时的 stderr 增加 `dsh: to accept the risk, run: …` 与 `dsh: plugin command failed; diagnostics: <path>`。
+  `DshPluginInstaller.failureNotes` 把它们转成"照做即可"的下一步（否则用户只看到 exit≠0，
+  无法区分"版本不兼容"与"网络失败"）。
+- `DshHomeManager.mcpDepsPresent()`：部署脚本前校验 `<运行时根>/dsh/node_modules/@modelcontextprotocol/sdk`。
+  自定义 `DSH_IDEA_RUNTIME` 指到没有 bridge 依赖的树时，明确 warn（而不是让工具静默消失）。
+- 欢迎页/内测声明组件改版（0.2.1 全树已搜不到 `Internal Testing Notice`/`内测声明` 文案），
+  自动点掉脚本按文案匹配可能失效 —— 但插件已预写 `welcomeNoticeVersion`，正常路径不会弹。
+
+**校验命令（离线组合，不启动服务）**：
+```powershell
+$env:DSH_HOME="<临时目录>"
+node <runtime>\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js --profile web --patch <ide.yml> --dump-config
+# 期望：退出 0；无 `patch: entry … not found`；`- id: credentials` / `- id: skill-filesystem` 被列出
+```
+
+**设置导入的真实行为（v0.2.6 实测，重要）**：dsh 逐 section 导入并按目标 entry 的 schema 校验。
+实测 `locale` 与 `ui-onboarding` 正常落进 `<共享根>/profiles/web/cordis.patch.yml`（形如
+`- id: locale` / `- id: ui-settings-general`），而**内容与 0.2.1 schema 不匹配的 section 会被跳过**，
+并原样留在 `<DSH_HOME>/settings.yaml.imported`（dsh 只记 warn，文件不删、内容不丢）。
+因此升级后若用户的某个自定义 provider/模型未出现，正确处置是"在 Web UI 重新添加一次"，
+而不是去改 `.imported` 文件；插件对 `settings.yaml` 只做**复制**（源文件保留），从不删除。
+
+**回归门**：`DshMcpBridgeSmokeTest.assertEsmResolves` 现在同时断言 `@modelcontextprotocol/sdk/server/mcp.js`、
+`.../streamableHttp.js`、`express`、`zod/v4` 可解析 —— 这是"运行时资产漏装 bridge 依赖"的唯一自动报警点。
+
+#### dsh 官方插件市场安装报 `ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF`（v0.2.6 用户实测，已修）
+
+**现象**：在 dsh 0.2.1 的 Web UI「插件」页（内置插件市场 `ui-plugin-manager`）点安装，报
+
+```
+[ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF] This modules directory was created using a different
+virtual-store-dir-max-length value. Run "pnpm install" to recreate the modules directory.
+```
+
+**根因：同一个 profile 被两个大版本的 pnpm 交替改动**（实测复现与修复全过程）：
+
+1. 插件预建了 `profiles/web/package.json`，而 dsh 的 `initProfile()` 只在 `package.json` **不存在**时才写
+   `pnpm-workspace.yaml` → 所有项目 profile 都**没有** `pnpm-workspace.yaml`（实测 4 个 home 全部缺）。
+2. 插件的「DSH 插件」页用**私有 pnpm 9.15.9** 装包 → `.modules.yaml` 记录
+   `packageManager: pnpm@9.15.9`、`virtualStoreDirMaxLength: 120`、`nodeLinker: isolated`、
+   `publicHoistPattern: ['*eslint*','*prettier*']`。
+3. dsh 0.2.1 的 Web 插件市场执行 `execa("pnpm")`，取 **dsh 子进程 PATH 上的 pnpm**——本机是 **11.22.0**；
+   pnpm 在改动 `node_modules` 前会**逐项比对** `.modules.yaml` 里记录的设置，于是拒绝操作。
+
+**为什么"只钉一个设置"不管用**（实测）：在 `pnpm-workspace.yaml` 里加 `virtualStoreDirMaxLength: 120`
+只消掉了第一个错误，紧接着报 `ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF` —— pnpm 9 与 11 的**多处默认值都不同**，
+更细的还会有 `hoistPattern`/`layoutVersion` 等。钉不全。
+
+**修复（v0.2.6）**：让**两条安装入口用同一个 pnpm** ——
+`DshProcessManager` 新增 `pathPrependDirs`，启动 dsh 时把私有 pnpm 的 shim 目录
+（`<共享根>/plugin-tools/bin`）**前置进 dsh 子进程的 PATH**；`DshPluginInstaller.syncShimForRuntime`
+在启动前用**当前运行时**的 node **重写 shim**（纯文本、不联网）。
+
+- **顺带修掉一个潜伏 bug**：`ensurePnpm` 在 "pnpm cli + shim 都在" 时直接复用、不校验内容，而 shim 里写死了
+  node 的绝对路径 → 插件升级到新 dsh 版本后，旧 shim 仍指向**旧运行时**的 node（实测本机 shim 指向
+  `runtime\0.1.5-rc.2\node\node.exe`）。若把这种 shim 前置进 PATH，等于把 dsh 的 pnpm 指向一个可能已删除的
+  node。现在每次启动都对齐。
+- **顺带修好"没有装 pnpm 的用户"**：dsh 的 Web 插件市场原本依赖用户 PATH 上有 pnpm；现在它拿到的是插件
+  自带的私有 pnpm（首次仍需联网准备，约 10–60s）。
+- **不需要重建任何 `node_modules`**：切换方向选的是"让 dsh 用 9.15.9"而不是"让插件用 11"，因为既有树就是
+  9.15.9 建的（换到 11 会让所有既有 profile 立刻失配，必须逐个重建）。
+
+**验证（同一棵树，dsh 自己的 `plugin` 子命令，与 Web 市场共用 `@deepseek-ai/dsh-plugin-manager`）**：
+
+| 场景 | 结果 |
+|---|---|
+| PATH 上有 pnpm 11.22.0，不注入 shim | 复现用户报错 `ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF` |
+| 注入私有 pnpm shim（9.15.9 + 当前运行时 node） | `pnpm v9.15.9`，安装成功、`dependencies`/`bundles` 正确落盘 |
+
+**已知限制（后续项 = MILESTONE_REVIEW C-7，v0.2.6 不做）**：dsh 0.2.1 的构建审批把 `allowBuilds` 写进
+`pnpm-workspace.yaml`，而私有 pnpm 是 9.15.9。**实测补充**：pnpm **9.15.9 根本不读 `pnpm-workspace.yaml`
+里的设置**（同一份 `virtualStoreDirMaxLength: 60`，pnpm 9 静默忽略、pnpm 11 会据此报 DIFF），
+因此对 9 来说 `allowBuilds` 是**双重无效**（不认这个 key + 不读这个文件）。后果：**需要 postinstall 的插件**
+（原生模块）可能"装上了但没构建"，而 dsh 的"批准构建"按钮点了也没用。
+
+**为什么不在 v0.2.6 顺手升到 pnpm 11**（用户已确认拆为独立项）：升到 11 会让**所有既有 profile 的
+`node_modules` 立刻失配**（`.modules.yaml` 记录 `packageManager: pnpm@9.15.9` + 9 的默认值），
+必须在修 bug 的版本里强制一次数据迁移；而 9.15.9 是 v0.2.5 全部自愈逻辑实测过的组合。
+另外"用 PATH 上那个 11.22.0"本身不是稳定契约 —— 那是**用户机器上的**版本（可能没装、可能是 12），
+所以只能"自己钉一个版本"，而这属于更换组件级别的独立变更。
+
+**C-7 实施设计（留档，便于后续直接实现）**：
+
+1. 把 `DshPluginInstaller.PNPM_VERSION` 换成目标大版本（如 `11.x`，与 dsh 0.2.1 的 `allowBuilds` 语义对齐）；
+   PATH 注入机制已就位（`DshProcessManager.pathPrependDirs` + `syncShimForRuntime`），改常量即可，两条入口自动一致。
+2. **启动时的一次性迁移**：读 `<profile>/node_modules/.modules.yaml` 的 `packageManager`；与目标大版本不一致时，
+   把整棵 `node_modules` **改名**为 `node_modules.migrating-<时间戳>`（不删除）→ 跑一次 `pnpm install`
+   （走 lockfile，store 命中即快）→ 成功删备份，失败改名回滚。**先备份再动**，避免"升级完插件反而丢了已装插件"。
+3. 迁移后**补写 `pnpm-workspace.yaml`**（dsh 的模板：`packages: [.]` + `nodeLinker: hoisted` +
+   `autoInstallPeers: false`）—— 现在所有 profile 都缺该文件，因为插件预建了 `package.json`，
+   而 dsh 的 `initProfile()` 只在 `package.json` 不存在时才写它。
+4. **回归清单**：Web 插件市场安装/卸载、插件页安装/卸载/修复、`link:` 本地规格、需要 postinstall 的原生插件、
+   既有 `ERR_PNPM_*` 自愈路径、以及"关掉 `shareDshProfiles` 的多 profile 场景"（迁移棵树 = 每项目一棵）。
+
+**运维提醒**：本次修复只统一了**两条自动化入口**。用户若在 profile 目录手工用自己全局的 pnpm（如 11.22.0）
+跑命令，仍会撞同一个错 —— 手工操作请用 `<共享根>\plugin-tools\bin\pnpm.cmd`（或等 C-7 完成后自然一致）。
+
+**如果用户已经踩到、且不想等插件升级**：在该 profile 目录手工跑一次
+`<共享根>\plugin-tools\bin\pnpm.cmd install`（用同一个 pnpm 重建 `node_modules`）即可恢复。
 
 ### v0.2.4 dsh 配置共享化（用户实测驱动的根因修复，全链路实测）
 

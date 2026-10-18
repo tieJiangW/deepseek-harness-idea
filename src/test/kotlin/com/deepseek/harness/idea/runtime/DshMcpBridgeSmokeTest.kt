@@ -176,8 +176,10 @@ class DshMcpBridgeSmokeTest {
         assertTrue(refreshText.contains("refreshed"), "tools/call ide_refresh_files should return bridge data; got: $refreshText")
 
         // 6) dsh web 带 failOnStartupError + 共享配置 patch 启动：连接失败会拒绝启动，故能起来即证明
-        //    MCP 链路与 patch 语法（`- id: settings` / `- id: credentials` / `- id: agent-presets` /
-        //    `- id: skill-filesystem`）都正确。
+        //    MCP 链路与 patch 语法（`- id: credentials` / `- id: skill-filesystem`，后者需
+        //    `disabled: false` 才能抵消 dsh 0.2.1 web 层的禁用）都正确。
+        //    注：`settings` / `agent-presets` 两段在 dsh 0.2.1 已失效（见 McpPatchGenerator 注释），
+        //    设置改由共享 profile 的 cordis.patch.yml 承担，因此不再出现在 patch 里。
         val patch = McpPatchGenerator.generateStrict(mcpPort, sharedHome.toString())
         val patchFile = home.resolve("ide.yml")
         Files.writeString(patchFile, patch, StandardCharsets.UTF_8)
@@ -197,14 +199,12 @@ class DshMcpBridgeSmokeTest {
 
         val webUrl = waitForDshWeb(dshProc, home)
         assertTrue(webUrl != null, "dsh web should boot with strict mcp patch (failOnStartupError)")
-        // 0.1.5：启动 URL 带 ?token=，首个 GET 返回 303（换取鉴权 cookie 的重定向）→ 接受 2xx/3xx
+        // 0.1.5+：启动 URL 带 ?token=，首个 GET 返回 303（换取鉴权 cookie 的重定向）→ 接受 2xx/3xx
         assertTrue(httpStatus(webUrl!!) in 200..399, "web ui should answer 2xx/3xx")
 
-        // 7) 共享配置化生效：凭证/设置由 dsh 写在**共享配置根**，项目 DSH_HOME 里不产生这两个文件。
-        assertTrue(
-            !Files.exists(home.resolve("settings.yaml")),
-            "settings must live in the shared config root, not in the per-project DSH_HOME",
-        )
+        // 7) 共享配置化生效：**凭据**仍由 patch 重定向到共享根，项目 DSH_HOME 里不产生该文件。
+        //    （settings 自 dsh 0.2.1 起不再是共享 settings.yaml，而是共享 profile 里的
+        //    cordis.patch.yml；此处不涉及，见 SharedSettingsImportTest。）
         assertTrue(
             !Files.exists(home.resolve(".credentials.yaml")),
             "credentials must live in the shared config root, not in the per-project DSH_HOME",
@@ -227,6 +227,10 @@ class DshMcpBridgeSmokeTest {
      * `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/`，靠向上查找 `dsh/node_modules` 解析
      * `@modelcontextprotocol/sdk` 与 `zod/v4`。Node **不越过 junction**（实测），放错位置会
      * `ERR_MODULE_NOT_FOUND`，故此处显式验证解析结果。
+     *
+     * v0.2.6 起 dsh 0.2.1 的安装树**不再自带** sdk/express（改用 `@modelcontextprotocol/client`），
+     * 由 `scripts/build-runtime.mjs` 的 BRIDGE_DEPS 显式装入。因此这里同时校验 `express`
+     * （`sdk/server/express.js` 直接 `import express from 'express'`）——缺它同样起不来。
      */
     private fun assertEsmResolves(nodeExe: File, dir: Path) {
         val probe = dir.resolve("resolve-probe.mjs")
@@ -234,8 +238,12 @@ class DshMcpBridgeSmokeTest {
             probe,
             """
             const sdk = import.meta.resolve('@modelcontextprotocol/sdk/server/mcp.js');
+            const http = import.meta.resolve('@modelcontextprotocol/sdk/server/streamableHttp.js');
+            const express = import.meta.resolve('express');
             const zod = import.meta.resolve('zod/v4');
             console.log('SDK_RESOLVED=' + sdk);
+            console.log('SDK_HTTP_RESOLVED=' + http);
+            console.log('EXPRESS_RESOLVED=' + express);
             console.log('ZOD_RESOLVED=' + zod);
             """.trimIndent(),
             StandardCharsets.UTF_8
@@ -245,8 +253,10 @@ class DshMcpBridgeSmokeTest {
             val out = p.inputStream.bufferedReader().readText()
             p.waitFor(30, TimeUnit.SECONDS)
             assertTrue(
-                out.contains("SDK_RESOLVED=") && out.contains("ZOD_RESOLVED="),
-                "ESM resolution must reach the dsh dependency tree from $dir; output:\n$out",
+                out.contains("SDK_RESOLVED=") && out.contains("SDK_HTTP_RESOLVED=") &&
+                    out.contains("EXPRESS_RESOLVED=") && out.contains("ZOD_RESOLVED="),
+                "ESM resolution must reach the dsh dependency tree from $dir " +
+                    "(dsh 0.2.1 dropped sdk/express; scripts/build-runtime.mjs must provide them); output:\n$out",
             )
         } finally {
             runCatching { Files.deleteIfExists(probe) }

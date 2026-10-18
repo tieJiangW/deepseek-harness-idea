@@ -302,7 +302,7 @@ internal object YamlText {
 }
 
 /**
- * 共享配置根迁移（v0.2.4，见 docs/DESIGN.md §4.4）。
+ * 共享配置根迁移（v0.2.4，见 docs/DESIGN.md §4.4；v0.2.6 按 dsh 0.2.1 契约调整落点）。
  *
  * **背景**：v0.1.3-dev ~ v0.2.3 采用"全局配置 + 每项目副本"（方案 A）：`ensureHome` 每次启动用
  * `copyGlobalConfigTo` 把共享根的 `settings.yaml` / `.credentials.yaml` **覆盖**项目 DSH_HOME 的同名文件。
@@ -311,11 +311,13 @@ internal object YamlText {
  *
  * **本迁移**（幂等，仅执行一次，标记 `<共享根>/.plugin-layout-version`）：
  * 1. 把各项目 DSH_HOME 里 `settings.yaml` / `.credentials.yaml` 与共享文档**合并**（共享侧优先，只补缺）；
- * 2. 原文件**移入** `<共享根>/migrated/<md5(项目路径)前16位>/` 备份，不再放回项目目录（共享化后 dsh 不再读它）；
+ * 2. 原文件**移入** `<共享根>/migrated/<md5(项目路径)前16位>/` 备份；
  * 3. 写标记，后续启动直接跳过。
  *
- * 迁移后 dsh 只读写共享根文档（由 `ide.yml` 的 `- id: settings` / `- id: credentials` patch 重定向），
- * 插件侧不再参与配置同步。
+ * **dsh 0.2.1 起 settings 的落点又变了一层**：`dsh-settings-file` 被移除，`<共享根>/settings.yaml`
+ * 不再被 dsh 长期读写，而只作为**一次性导入源**——由 [importLegacySettingsInto] 搬到
+ * `<DSH_HOME>/settings.yaml`，dsh 首次启动时导入进 **profile 的 `cordis.patch.yml`** 并改名
+ * `settings.yaml.imported`。凭据的真源仍是 `<共享根>/.credentials.yaml`（`- id: credentials` patch 指向）。
  */
 object SharedConfigMigrator {
 
@@ -327,8 +329,14 @@ object SharedConfigMigrator {
     const val SETTINGS_FILE = "settings.yaml"
     const val CREDENTIALS_FILE = ".credentials.yaml"
 
+    /** dsh 0.2.1 导入 `settings.yaml` 后留下的留档后缀（`dsh-settings.importLegacyDocument`）。 */
+    const val SETTINGS_IMPORTED_SUFFIX = ".imported"
+
     /** 备份目录名（共享根下）。 */
     const val MIGRATED_DIR = "migrated"
+
+    /** 内测/欢迎声明所在的顶层 section（dsh 导入时映射到 `ui-settings-general` entry）。 */
+    const val WELCOME_NOTICE_SECTION = "ui-onboarding"
 
     /** 迁移结果（供调用方记日志/发通知）。 */
     data class Outcome(
@@ -462,6 +470,77 @@ object SharedConfigMigrator {
             mergedCredentials = mergedCred.toList(),
             failures = failures,
         )
+    }
+
+    /**
+     * 把旧配置搬成 dsh 0.2.1 的"待导入文档"`<home>/settings.yaml`，并补写内测声明版本。
+     *
+     * dsh 0.2.1 的启动序列：Loader 就绪 → `dsh-settings.importLegacyDocument()` 读
+     * `<DSH_HOME>/settings.yaml` → 逐 section 写进 profile 的 `cordis.patch.yml`（按
+     * `LEGACY_SECTION_ENTRIES` 把 `ui-onboarding`/`ui-developer-tools`/`shell` 映射到对应 entry）
+     * → 原文件改名 `settings.yaml.imported`。因此插件只需把文档放到该位置；
+     * 由于 `<DSH_HOME>/profiles` 指向共享根，**导一次即对所有项目生效**。
+     *
+     * 幂等：
+     * - `.imported` 已存在 → 已导入过，什么都不做（避免把用户在 Web UI 里改过的设置覆盖回去）；
+     * - 目标文件已存在 → 本次启动会导入，只补缺失的 `ui-onboarding` 段；
+     * - 共享根有旧 `settings.yaml` → 以它为源（**复制而非移动**，保留原文件作备份）；
+     * - 两者都没有（全新安装）→ 只写内测声明，避免首次打开被欢迎页打断。
+     *
+     * @param home 项目 DSH_HOME
+     * @param sharedRoot 共享配置根（旧 `settings.yaml` 的来源）
+     * @param welcomeNoticeVersion dsh 的 `WELCOME_NOTICE_VERSION`（如 `2026-09-28.1`）
+     * @return 动作描述（供日志与单测）：`already-imported` / `pending` / `pending-merged-welcome` /
+     *   `imported-legacy` / `seeded-welcome` / `failed: …`
+     */
+    fun importLegacySettingsInto(home: Path, sharedRoot: Path, welcomeNoticeVersion: String): String {
+        val target = home.resolve(SETTINGS_FILE)
+        val imported = home.resolve(SETTINGS_FILE + SETTINGS_IMPORTED_SUFFIX)
+        val welcomeBlock = "$WELCOME_NOTICE_SECTION:\n  welcomeNoticeVersion: \"$welcomeNoticeVersion\"\n"
+        val marker = { _: String -> "# added by DeepSeek Harness" }
+        return try {
+            if (Files.isRegularFile(imported, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                "already-imported"
+            } else {
+                Files.createDirectories(home)
+                val existing = if (Files.isRegularFile(target, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                    runCatching { Files.readString(target, StandardCharsets.UTF_8) }.getOrNull()
+                } else null
+                if (existing != null) {
+                    // 已有待导入文档（用户手写或上一轮尚未导入）：只补缺失的内测声明段
+                    if (WELCOME_NOTICE_SECTION in YamlText.topLevelKeys(existing)) {
+                        "pending"
+                    } else {
+                        val (merged, _) = YamlText.mergeMissingNamespaces(
+                            existing, mapOf(WELCOME_NOTICE_SECTION to welcomeBlock), marker,
+                        )
+                        Files.writeString(target, merged, StandardCharsets.UTF_8)
+                        "pending-merged-welcome"
+                    }
+                } else {
+                    val legacy = sharedRoot.resolve(SETTINGS_FILE).let { f ->
+                        if (Files.isRegularFile(f, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                            runCatching { Files.readString(f, StandardCharsets.UTF_8) }.getOrNull()
+                        } else null
+                    }
+                    if (legacy != null && YamlText.hasContent(legacy)) {
+                        val (merged, added) = YamlText.mergeMissingNamespaces(
+                            legacy, mapOf(WELCOME_NOTICE_SECTION to welcomeBlock), marker,
+                        )
+                        Files.writeString(target, merged, StandardCharsets.UTF_8)
+                        LOG.info("staged legacy settings for the dsh 0.2.1 import at $target (welcome prefill added=${added.isNotEmpty()})")
+                        "imported-legacy"
+                    } else {
+                        Files.writeString(target, welcomeBlock, StandardCharsets.UTF_8)
+                        LOG.info("seeded the settings import document with welcomeNoticeVersion=$welcomeNoticeVersion: $target")
+                        "seeded-welcome"
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            LOG.warn("failed to stage the legacy settings import document at $target", e)
+            "failed: ${e.message}"
+        }
     }
 
     /**

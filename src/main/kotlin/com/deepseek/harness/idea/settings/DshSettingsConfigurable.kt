@@ -190,8 +190,8 @@ class DshSettingsConfigurable : SearchableConfigurable {
         val status = JBLabel(" ")
         importStatus = status
 
-        // 共享配置目录（v0.2.4）：dsh 的用户级配置（模型/凭据/Agent 预设/个人技能）全部在这里，
-        // 所有项目共享。Web「Settings → Models」改的正是该目录下的 settings.yaml。
+        // 共享配置目录（v0.2.4；v0.2.6 按 dsh 0.2.1 契约更新）：模型/语言/Agent 预设由 dsh 写入
+        // 共享 profile 的 cordis.patch.yml；凭据在 .credentials.yaml；用户技能在 skills/。
         val sharedRoot = runCatching { DshHomeManager.getInstance().sharedConfigRoot().toString() }.getOrNull().orEmpty()
         val sharedRootField = JBTextField(sharedRoot).apply {
             isEditable = false

@@ -342,6 +342,11 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
                 Disposer.register(this, bridge)
 
                 val patchFile = waitForMcpPatch(bridge, homePath)
+                // v0.2.6：dsh 0.2.1 的 Web UI 插件市场用 PATH 上的 pnpm，而「DSH 插件」页用私有 pnpm。
+                // 把私有 pnpm 的 shim 目录前置进 dsh 子进程 PATH，保证两条入口用同一个 pnpm ——
+                // 版本不同会在同一个 node_modules 上互相拒绝（ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF）。
+                val sharedPnpmShim = com.deepseek.harness.idea.plugins.DshPluginInstaller
+                    .syncShimForRuntime(homeManager.sharedConfigRoot(), homeManager.nodeExe())
                 val manager = DshProcessManager(
                     nodeExe = homeManager.nodeExe().toFile(),
                     dshBin = homeManager.dshBin().toFile(),
@@ -355,6 +360,7 @@ class DshToolWindowPanel(private val project: Project) : JPanel(CardLayout()), D
                         put("DSH_LOG_LEVEL", com.deepseek.harness.idea.settings.DshSettingsState.getInstance().logLevel)
                         // 注意：不注入 DEEPSEEK_API_KEY 环境变量（见 DshHomeManager.syncCredentials 注释）。
                     },
+                    pathPrependDirs = listOfNotNull(sharedPnpmShim?.toFile()),
                 )
                 processManager = manager
                 manager.addListener(this)

@@ -135,6 +135,35 @@
 
     <change-notes><![CDATA[
         <h3>English / 中文</h3>
+        <h4>v0.2.6</h4>
+        <ul>
+            <li><b>Runtime upgraded to DeepSeek Harness 0.2.1-rc.2 (Node.js 22.23.2).</b> The launch, browser-auth
+            (<code>?token=</code> → cookie), workspace RPC, storage layout and composer contracts are unchanged and
+            were re-verified against the real runtime. Because dsh 0.2.1 no longer ships the MCP server SDK, the
+            runtime build now installs <code>@modelcontextprotocol/sdk</code> and <code>express</code> itself and
+            asserts they resolve, so the IDE tools keep working after the upgrade (a missing dependency would have
+            silently disabled all <code>ide_*</code> tools).</li>
+            <li><b>Configuration sharing adapted to dsh 0.2.1.</b> dsh moved user settings from
+            <code>settings.yaml</code> into the profile's <code>cordis.patch.yml</code>. Existing settings are migrated
+            once (backed up as <code>settings.yaml.imported</code>) and remain shared across projects; API keys and
+            personal skills are still redirected to the shared config home. Agent presets now follow the shared
+            profile, so they stay shared too.</li>
+            <li><b>Plugin installation reports incompatible versions.</b> When dsh refuses a package because it does
+            not support the running runtime, the plugin now surfaces the exact <code>allow-version</code> command and
+            the dsh diagnostics log path instead of a bare failure.</li>
+        </ul>
+        <ul>
+            <li><b>运行时升级到 DeepSeek Harness 0.2.1-rc.2（Node.js 22.23.2）。</b>启动、浏览器鉴权
+            （<code>?token=</code> → cookie）、工作区 RPC、存储布局与 composer 契约均未变化，并已对真实运行时复验。
+            由于 dsh 0.2.1 不再自带 MCP server SDK，运行时构建改为显式安装
+            <code>@modelcontextprotocol/sdk</code> 与 <code>express</code> 并断言可解析，从而保证升级后 IDE 工具仍可用
+            （依赖缺失会让全部 <code>ide_*</code> 工具静默失效）。</li>
+            <li><b>配置共享适配 dsh 0.2.1。</b>dsh 已把用户设置从 <code>settings.yaml</code> 迁到 profile 的
+            <code>cordis.patch.yml</code>。既有设置会一次性迁移（原文件留档为 <code>settings.yaml.imported</code>），
+            并继续跨项目共享；API Key 与个人技能仍指向共享配置目录。Agent 预设随共享 profile 一起共享。</li>
+            <li><b>插件安装会提示版本不兼容。</b>当 dsh 因"包不支持当前运行时"而拒绝安装时，插件会给出可直接执行的
+            <code>allow-version</code> 命令与 dsh 诊断日志路径，而不是只报一句失败。</li>
+        </ul>
         <h4>v0.2.5</h4>
         <ul>
             <li><b>Install a dsh plugin package once and every project loads it.</b> Each project's

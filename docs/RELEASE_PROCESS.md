@@ -327,3 +327,19 @@ node scripts/secret-audit.mjs
   （见 `release-runtime.md` §3.1）。
 - API 推送不会更新本地 `origin/main` 引用（本地对象库里没有 API 生成的 commit 对象）；下次在有网络的环境
   `git fetch` 即可对齐，内容与本地提交一致。
+
+### 8.1 v0.2.6 发布记录（2026-10-18，本通道实测）
+
+| 项 | 结果 |
+| --- | --- |
+| 连通性 | `api.github.com` → 200；`uploads.github.com` → 302；**`github.com` → 000**（`git push` / `git fetch` 均不可用） |
+| 代码推送 | `scripts/release-v0.2.6.mjs` 先试 `git push`（失败），随后**自动**走 Git Data API：`POST /git/blobs` → `POST /git/trees`（能 diff 时带 `base_tree`，否则整树快照）→ `POST /git/commits` → `PATCH /git/refs/heads/main`；再 `POST /git/refs` 建 tag |
+| Release 与资产 | `POST /releases` + `POST uploads.github.com/.../assets?name=…`，共 **11 个资产**：插件 zip + 5 平台 `runtime-<os>-<arch>.zip` + 5 个 `.sha256` |
+| Marketplace | **本版有意不上传**（用户决定）；脚本在 `MARKETPLACE_TOKEN` 未设置时自动跳过该段 |
+| 凭据 | 只从 `$env:GITHUB_PAT` 读；脚本对 `git` 输出做了脱敏（`gh?_***` / `x-access-token:***@`），避免报错时把 token 打进控制台或日志 |
+
+**新增脚本**：`scripts/release-v0.2.6.mjs`（= `release-v0.2.5.mjs` + 版本号 + §8 API 推送回退 + 输出脱敏）。
+后续版本沿用同样模式：复制上一版脚本 → 改 `TAG`/`PLUGIN_ZIP`/`NOTES` → 运行。
+
+**踩坑**：本地 `build/` 里同时放着运行时树与 zip 产物，发布前**不要**跑 `gradle clean`（会把正在被 IDE 使用的
+运行时树一起删掉，见 `docs/README.md` 的环境注意事项）。

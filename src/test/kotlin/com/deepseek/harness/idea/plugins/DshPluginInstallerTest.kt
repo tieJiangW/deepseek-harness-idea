@@ -56,6 +56,39 @@ class DshPluginInstallerTest {
         assertTrue(!DshPluginInstaller.isSelfHealableModulesError(""))
     }
 
+    // ---- 失败输出增强（dsh 0.2.1 新增 stderr） ----
+
+    /**
+     * dsh 0.2.1 的 `dsh plugin` 会做 `engines.dsh` 兼容判定：不兼容时拒绝安装，并打印一行
+     * 可复制执行的 `allow-version … --accept-risk`。用户只看到 exit≠0 时无法区分"版本不兼容"
+     * 与"网络失败"，因此必须把命令和结论一起补进输出。
+     */
+    @Test
+    fun `explains an incompatible plugin version and surfaces the approval command`() {
+        val output = """
+            dsh: pnpm add failed
+            dsh: to accept the risk, run: dsh plugin --profile web allow-version my-plugin@1.0.0 --dsh-version 0.2.1-rc.2 --accept-risk
+        """.trimIndent()
+        val notes = DshPluginInstaller.failureNotes(output)
+        assertEquals(1, notes.size, notes.toString())
+        assertTrue(notes[0].contains("not compatible"), notes[0])
+        assertTrue(notes[0].contains("allow-version my-plugin@1.0.0"), notes[0])
+    }
+
+    @Test
+    fun `surfaces the dsh diagnostics log path`() {
+        val output = "dsh: plugin command failed; diagnostics: C:/tmp/dsh-plugin-1234.log\n"
+        val notes = DshPluginInstaller.failureNotes(output)
+        assertEquals(1, notes.size, notes.toString())
+        assertTrue(notes[0].contains("C:/tmp/dsh-plugin-1234.log"), notes[0])
+    }
+
+    @Test
+    fun `plain failures get no extra notes`() {
+        assertTrue(DshPluginInstaller.failureNotes("ERR_PNPM_FETCH_404  not in the registry").isEmpty())
+        assertTrue(DshPluginInstaller.failureNotes("").isEmpty())
+    }
+
     // ---- 命令行拼装 ----
 
     @Test
