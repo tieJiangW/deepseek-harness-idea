@@ -238,10 +238,11 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 
 **MCP Server（`mcp-ide-server.mjs`）**：
 
-- **全局唯一一份**，部署在 `<运行时根>/.dsh-ide-bridge/mcp-ide-server.mjs`（v0.2.4）：脚本在该目录下
-  `import '@modelcontextprotocol/sdk/...'` / `'zod/v4'` 时，Node 的 ESM 解析会向上命中
-  `<运行时根>/dsh/node_modules/`（dsh 自身安装树），因此**不需要任何 `node_modules` 链接**。
-  运行时根不可写时降级为 `<共享根>/.dsh-ide-bridge/` + 那里唯一一个链接。
+- **全局唯一一份**，部署在 `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/mcp-ide-server.mjs`
+  （`DshHomeManager.mcpServerScript()`；v0.2.4）：脚本在该目录下 `import '@modelcontextprotocol/sdk/...'` /
+  `'zod/v4'` 时，Node 的 ESM 解析向上命中 `<运行时根>/dsh/node_modules/`（dsh 自身安装树），因此**不需要任何
+  `node_modules` 链接**。**注意 ESM 解析不越过 junction/符号链接**（实测）：脚本必须真正落在 dsh 树内部，
+  不能靠"给运行时根建链接"凑解析路径。运行时树不可写时 MCP 工具不可用，但 Web UI 与对话不受影响（仅记日志）。
 - 用 SDK `StreamableHTTPServerTransport` 起 `127.0.0.1:<mcpPort>`；mcpPort 随机（`--port 0` 或 HttpServer 自选）。
 - 注册工具（raw name → 参数 → 调 IDE Bridge，带 token）：
   - `ide_get_selection` → `GET /selection`
@@ -272,8 +273,9 @@ dsh 的 workspace 是**显式注册制**：`storages/workspace.json` 无记录�
 ```
 
 - 模型侧工具名：`mcp__ide__ide_get_selection` 等（raw name 前缀 `mcp__<serverName>__`）。
-- MCP server（`mcp-ide-server.mjs`）**全局部署一份**于 `<运行时根>/.dsh-ide-bridge/`，依赖由
-  `<运行时根>/dsh/node_modules` 天然向上解析（v0.2.4 起不再建任何 junction，见 §3.6/§4.4）。
+- MCP server（`mcp-ide-server.mjs`）**全局部署一份**于
+  `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/`，依赖由 `<运行时根>/dsh/node_modules`
+  天然向上解析（v0.2.4 起不再建任何 junction，见 §3.6/§4.4）。
 - `failOnStartupError: true`（测试/诊断形态）：MCP 连接或工具同步失败即拒绝启动，用于冒烟验证。
 
 ### 3.7 代码上下文发送
@@ -384,6 +386,11 @@ const FOLDER_REF_RE = /(^|\s)(@(?:"[^"\n]*\/|[^\s"]+\/))/g;        // 只认"以
   - 运行时相关（v0.2.0+，行为见 §3.2）：runtime-directory（指向本地已解压运行时，配置后跳过下载，等价 `DSH_IDEA_RUNTIME`）；运行时下载 URL（v0.2.1 起设置页回显当前平台**精确到文件的 URL** + 一键复制）与下载超时（可配置）；「选择本地运行时 zip…」离线导入（校验 zip 与 `.sha256` 侧车）。
   - **共享配置目录（v0.2.4）**：只读展示 `DshHomeManager.sharedConfigRoot()` +「打开」按钮，便于用户
     直接查看/编辑 dsh 的共享配置（dsh 对 `settings.yaml` 有热重载，外部编辑会即时生效）。
+  - **跨项目共享 dsh 插件包（v0.2.5）**：`shareDshProfiles`（默认 true）。勾选即把每项目
+    `<DSH_HOME>/profiles` 链接到 `<共享根>/profiles`，让 dsh 插件"装一次、多项目生效"（数据面隔离不变，
+    见 §3.12）。变更后 `apply` 会立刻对所有已打开项目重跑 `ensureHome`（建/断链接），运行中的 dsh 需重启生效。
+  - **DSH 插件页（v0.2.5）**：`DshPluginsConfigurable`（`id=dsh.plugins`，`parentId=dsh.settings`），
+    见 §3.12。该页**没有**需要持久化的字段（`isModified=false`、`apply` 为空），操作即时生效。
 - **API Key（`DshCredentials`，PasswordSafe 应用级）**：
   - 读写 `PasswordSafe`（应用级凭据条目）。
   - **脱敏回显**（用户要求"前 6 位 + 中间脱敏 + 后 6 位"）：`DshCredentials.maskApiKey(key)` 前 6 位 + `******` + 后
@@ -429,6 +436,57 @@ const FOLDER_REF_RE = /(^|\s)(@(?:"[^"\n]*\/|[^\s"]+\/))/g;        // 只认"以
 - 技术边界：发送按钮 aria-label 为 "Send message" / "发送消息"（`t("input.send")`）。
   **0.1.5 起 composer 为 Lexical contenteditable**——v0.2.4 已完成适配并**在真实页面（CDP）验证**，
   见 §3.7.1（历史状态：0.1.1 为 React 受控 `<textarea>`，用原生 setter + `input` 事件）。
+
+### 3.12 dsh 插件包（v0.2.5：共享 profile + 安装器）
+
+用户诉求：**在一个项目里装 dsh 插件包，所有项目都生效**（与 v0.2.4 的配置面共享同一诉求）。
+
+**为什么插件包此前不共享**：dsh 把插件装进 `$DSH_HOME/profiles/<name>/node_modules`（`resolveProfileDir(name, home)`
+= `join(home, "profiles", name)`），而插件让每个项目拥有独立 `DSH_HOME`（§4.4 的数据面隔离），
+因此每个项目各有一份 profile、各有一份插件。
+
+**方案（A，已实测）**：把**每项目的 `<DSH_HOME>/profiles` 目录**链接到共享根下的
+`<共享配置根>/profiles`：
+- `dsh plugin --profile web add <pkg>` 在任何项目里执行都落在同一个 profile → 装一次，所有项目加载；
+- `sessions` / `storages` / `attachments` 仍在各自 DSH_HOME，数据隔离**不变**（实测两实例并发无冲突）；
+- 被否掉的方案 B（全局化 `DSH_HOME`、再用 patch 把数据面指回项目）需覆盖 sessions/storages/attachments/spill
+  等全部数据面，易遗漏且与 dsh 的 bootstrap 逻辑纠缠。
+
+**链接的建立与失败兜底**（`DshHomeManager.ensureProfiles` + `SharedProfilesLink`）：
+| 项目侧现状 | 动作 |
+|---|---|
+| 不存在 | 建链接（Windows `mklink /J` junction，其它平台符号链接） |
+| 已是正确链接 | 无操作（幂等） |
+| 是链接但指向别处 | 断链后重建 |
+| 是真实目录 | 先播种共享 profile（仅补缺失的 `package.json` / `cordis.yml` / `cordis.patch.yml`），再把整目录**移动**备份到 `<共享根>/profiles-migrated/<hash>/`（跨卷失败则退到同父目录改名），最后建链接；建链失败则**移回**，本项目继续用独立 profile |
+| 开关关闭 | 断链 + 重建空目录（骨架由 `ensureHome` 的 `writeIfAbsent` 播种），共享根与已装插件**不删** |
+
+- **不做逐文件合并**：项目侧 `node_modules` 是 pnpm 布局（`.pnpm` store + 内部链接/硬链接耦合），
+  合并语义无法安全定义；有用户内容（`node_modules` 或 patch 含 `insert`）时仅留档并在日志注明。
+- **失败绝不阻断启动**：dsh 对 profile 加载是 fail-loud，所以任何链接/迁移失败都降级为"项目独立 profile"
+  并只记日志；原因经 `DshHomeManager.profilesState()` 呈现在设置页（`not-created` /
+  `link-points-elsewhere` / `independent-directory`），用户可重开关闭-开启重试。
+
+**安装器（`DshPluginInstaller`）为什么转发给 `dsh plugin` 而不是直接调 pnpm**：dsh 的
+`plugin-*.js`（`runPlugin`）额外做了三件事——① 首次使用时按模板初始化 profile（`bundles` + `patchReload`）；
+② 把相对路径规格**锚定到调用者 cwd**；③ 安装后 `reconcilePlugins` 按**实际装出来的包名**把"声明了
+`dsh.bundle.patch` 的依赖"追加进 `dsh.profile.bundles`（`link:`/git/tarball 别名规格也能正确落名）。
+唯一前置条件是 PATH 里要有 `pnpm`（`spawnSync("pnpm", …, {shell:true})`，缺失时 dsh 返回 127），
+因此插件在 `<共享根>/plugin-tools/` 下用**运行时自带的 npm** 装一份私有 pnpm（`pnpm@9.15.9`，
+首次联网、之后离线复用），并生成 shim（Windows `pnpm.cmd` / Unix 带 shebang 的可执行脚本）前置到子进程 PATH。
+不改用户全局环境，也不写运行时树（运行时树可能只读）。
+
+- **回滚**：每次操作前把 `package.json` / `pnpm-lock.yaml` / `cordis.patch.yml` / `pnpm-workspace.yaml`
+  备份到 `<共享根>/plugin-backups/<yyyyMMdd-HHmmss-SSS>/`；命令非零退出则回写这些文件
+  （包体留在 `node_modules` 无害：manifest 未声明就不会被加载）。安装器全程加锁，避免两个 IDE 窗口并发写坏 lockfile。
+- **规格校验**（`DshProfileManifest.validateSpec`）：拒绝空白与 shell 元字符（实测 `a&b` 只传进 `a` 并返回非零）、
+  拒绝 `-` 开头、拒绝**相对路径**（dsh 以 profile 目录为 cwd 锚定，会解析到 `<profile>/../…`）；
+  `^` 版本范围在 Windows 上自动加双引号（实测不加引号会被 `cmd` 当转义符吃掉：`pkg@^1.2.0` → `pkg@1.2.0`）。
+- **UI**：`Settings → Tools → DeepSeek Harness → DSH Plugins`（`DshPluginsConfigurable`，`id=dsh.plugins`）+
+  工具窗标题栏动作（`ManagePluginsAction`）。列出 bundle 插件与纯依赖（后者"装上但不会被加载"），
+  支持按包名/版本范围/本地绝对路径安装、选中卸载、打开目录、查看命令输出。
+  dsh 的 Web UI 没有安装入口（`ui-settings-plugin-inventory` 只读），所以入口在插件侧。
+  安装/卸载后需**重启 Harness**（工具窗标题栏「重启」）才加载。
 
 ## 4. 接口契约
 
@@ -477,30 +535,42 @@ stdout   = 逐行读取；含 "dsh web: http://127.0.0.1:<webPort>"
 > 放在后面会被 web 应用当作未知选项拒绝（实测 dsh 0.1.1-rc.2）。
 > `--no-open`：dsh web 默认会把 Web UI 打开到系统默认浏览器；内嵌于 IDE 工具窗，显式禁用（用户要求，v0.1.3-dev）。
 
-### 4.4 运行时与目录布局（共享配置根 + 每项目 DSH_HOME，v0.2.4）
+### 4.4 运行时与目录布局（共享配置根 + 每项目 DSH_HOME，v0.2.5）
 
 ```
 <PathManager.getConfigDir()>/dsh-idea/
 ├── runtime/<version>/                     # 运行时（v0.2.0+ thin：首次按平台下载+SHA-256 校验；全局共享，不按项目）
-│   ├── node/                              # Node.js 运行时（按平台：node.exe / node，归一化布局）
+│   ├── node/                              # Node.js 运行时（按平台：node.exe / node，归一化布局；含私有 npm）
 │   ├── dsh/                               # npm 安装的 @deepseek-ai/dsh 树（含全部依赖）
 │   ├── dsh/node_modules/                  #   MCP 脚本依赖的解析落点
-│   └── .dsh-ide-bridge/mcp-ide-server.mjs #   ★ MCP server 脚本（全局唯一一份；v0.2.4）
+│   └── dsh/node_modules/@deepseek-ai/dsh-ide-bridge/mcp-ide-server.mjs  # ★ MCP server 脚本（全局唯一一份；v0.2.4）
 └── dsh-home/                              # ★ 共享配置根（所有项目共享；v0.2.4 起 = DshHomeManager.sharedConfigRoot()）
     ├── settings.yaml                      #   dsh 设置文档唯一真源（模型 provider/自定义模型、语言、内测声明）
     ├── .credentials.yaml                  #   dsh 凭据唯一真源（version:1 + refs/records）
     ├── .agent-presets/                    #   Agent 预设（用户可作者化根）
     ├── skills/                            #   个人技能（项目技能仍在 <项目>/.dsh/skills）
+    ├── profiles/                          # ★ 共享 dsh profile 根（v0.2.5；每项目的 profiles 链接到这里）
+    │   ├── web/                           #   web profile（package.json 的 dsh.profile.bundles = 插件层序）
+    │   ├── node_modules/                  #   dsh 自愈创建的共享 fallback（bundle 依赖解析落点）
+    │   └── web/node_modules/              #   pnpm 安装的插件包（装一次 → 所有项目加载）
+    ├── plugin-tools/                      #   私有 pnpm（v0.2.5；`bin/pnpm.cmd` shim + node_modules/pnpm）
+    ├── plugin-backups/<时间戳>/           #   安装/卸载前的 manifest 与 lockfile 备份（失败回滚用）
+    ├── profiles-migrated/<hash>/          #   v0.2.5 迁移备份（旧的项目级 profiles 整目录移入，不合并）
     ├── .plugin-layout-version             #   插件写入：一次性布局迁移完成标记
     ├── migrated/<md5(项目路径)前16位>/     #   迁移备份（旧的项目级 settings.yaml / .credentials.yaml）
-    ├── sessions/ storages/ profiles/      #   仅历史残留（v0.1.2 全局 DSH_HOME；sessions 由迁移器读取）
+    ├── sessions/ storages/                #   仅历史残留（v0.1.2 全局 DSH_HOME；sessions 由迁移器读取）
     └── <md5(项目根目录)前16位>/            # ★ 每项目 DSH_HOME（**只承载数据面**）
         ├── ide.yml                        #   patch（每项目；含动态 mcpPort）
-        ├── profiles/web/                  #   物化 web profile（package.json + cordis.yml）
-        ├── profiles/node_modules/         #   dsh 首次启动自愈创建的 junction → runtime/dsh/node_modules
+        ├── profiles → ../../profiles      #   ★ 指向共享 profile 根的链接（junction/符号链接；v0.2.5）
         ├── sessions/ storages/            #   会话 + 工作区注册表 + 投影缓存（dsh 自动创建；每项目独立）
         └── attachments/                   #   图片附件对象存储（<DSH_HOME>/attachments/v1/objects/<sha256>）
 ```
+
+> **为什么 `profiles` 单独共享（v0.2.5）**：dsh 的插件包装在 `$DSH_HOME/profiles/<name>/node_modules`，
+> 而会话/工作区/附件都在 `$DSH_HOME` 下。只链接 `profiles` 一个目录即可实现"插件装一次、所有项目生效"，
+> 且**不动**数据面（不需要像"全局化 DSH_HOME"那样逐个把 sessions/storages/attachments/spill 指回项目）。
+> 关闭开关（`shareDshProfiles=false`）即断链回每项目独立 profile，共享根与已装插件保留不删。
+> 幂等与迁移规则见 §3.12。
 
 > **为什么这样切分（v0.2.4，用户实测驱动）**：dsh 的**用户级配置面**天然只有一份（Web「Settings → Models」
 > 写的 `llm-pi-ai` / `llm-deepseek` 段、语言 `locale`、API Key、Agent 预设、个人技能），而**数据面**
@@ -624,8 +694,11 @@ stdout   = 逐行读取；含 "dsh web: http://127.0.0.1:<webPort>"
 - `DshCredentialsMaskTest`(10)：API key 脱敏 + 凭据文件解析（v0.1.3-dev）
 - `DshCredentialsSyncTest`(6)：Web UI 改 key 回写全局的比对逻辑（v0.1.3-dev）
 - `PlatformTest` / `RuntimeAssetsTest` / `RuntimeProvisionerTest`（v0.2.0 引入：平台解析 / `runtime-assets.json` 资产地图 / 下载 + `.sha256` 校验 + 安全解压；v0.2.1 加固：首次下载失败修复、HTTP/2 池化客户端、超时与退避重试、进度/取消状态机，见 §3.2）
+- `SharedProfilesLinkTest`(11)（v0.2.5）：`profiles` 链接四态判定（不存在 / 真实目录 / 正确链接 / 指向别处）、播种与回填清单、用户内容判定——全部用**真实 junction / 符号链接**验证
+- `DshProfileManifestTest`(14)（v0.2.5）：profile manifest 解析（真实 pnpm/dsh 形状、转义、非字符串字段、损坏输入降级为空）+ 插件规格校验（空 / `-` 开头 / 空白与 shell 元字符 / 相对路径 / `^` 需加引号）
+- `DshPluginInstallerTest`(13)（v0.2.5）：`dsh plugin` 参数拼装、私有 pnpm 落点、PATH 注入（Windows `Path` 键归一）、备份目录与时间戳、profile 读取
 
-> 注：以上各测试括号内数字为其**引入时**的用例口径，非当前值；截至 v0.2.1，`gradle test` 全量（§7.1 + §7.2）累计 **122 个测试、0 失败**。
+> 注：以上各测试括号内数字为其**引入时**的用例口径，非当前值；截至 **v0.2.5**，`gradle test` 全量（§7.1 + §7.2）累计 **232 个测试、0 失败**。
 
 ### 7.2 集成冒烟（Gradle `test` + `DSH_IDEA_RUNTIME`）
 
@@ -690,3 +763,4 @@ PRD §7 验收清单 9 条（含 v0.1.3-dev 新增"DSH 一键解释"）。
 | 2026-09-15 | v0.2.3 | dsh 运行时 0.1.1-rc.2 → **0.1.5-rc.2**：① 常量与脚本同步（`DshHomeManager.DSH_VERSION`、`build.gradle.kts` `dshVersion`、`scripts/build-runtime.mjs`/`.ps1` 默认值）；重建 win-x64 运行时并更新 `release-assets/`。② **浏览器鉴权（0.1.5 新增）**：启动行 `dsh web: http://127.0.0.1:<port>/?token=<t>`；`GET /`（无 token）401，`GET /?token=` 303 + `Set-Cookie: dsh-auth-<authority-hash>=v1.…`；`/api` 一律要该 cookie。`PortParser.parseUrl` 保留完整 URL；`DshProcessManager.launchUrl` 供 JCEF/健康检查/`onUrlReady`（健康检查 `instanceFollowRedirects=false`，`200..399 || 401` 视为就绪）；`WorkspaceInitializer.bootstrapSessionCookie` 换取 cookie。③ **RPC 契约**：`workspace/<method>` 斜杠命名空间；信封 `{"type":"client-request","rpcId","method","payload":{"args":{"request":{…}}}}`；`workspace/list` 移除，置顶顺序改读 `storages/workspace.json` v2 `global.workspaceIds`（新增 `waitWorkspaceOrder`/`readWorkspaceOrder`）。④ 未适配（已知降级）：0.1.5 composer 由 `<textarea>` 改 Lexical contenteditable，JS 注入走剪贴板兜底。**五平台运行时**（新增 macOS x64 / Linux arm64）由本地交叉构建补齐（`build-runtime.mjs`：符号链接容错 / 主机 node 执行 npm / `--libc glibc` / 按主机能力选 zip 命令）。**设置页**：「运行时下载地址」反显当前生效值 + 默认按钮、「运行时目录」新设置项（默认按钮填入插件默认目录，**等价于未设置**）、本地 zip 选择器修复（`chooseJars`）与 VFS 暂存导入、错误卡换行与诊断。**IDE 边界**：2024.1.7 / 2024.3.2 / 2026.2 编译（含测试代码）全部通过。测试 **130 项全部通过** |
 | 2026-09-17 | v0.2.4 | **修复"发送选中代码 / 日志一键解释 没反应"**（用户报告，真实页面 CDP 实测定位）。根因三项：① dsh 0.1.5 的 composer 是 **Lexical `contenteditable`**（`<div data-lexical-editor="true" role="textbox" contenteditable="true">`），旧的 `document.querySelector('textarea')` 命中 0 → 注入静默失败；② 回读判定读错位置——Lexical 文本在 `[data-lexical-text="true"]` 节点里，写入**当拍**根元素 `innerText`/`textContent` 可能为空，导致"已成功注入"被误判为失败并降级剪贴板；③ 输入框**仅在进入会话后**渲染（停在内测声明/"选择工作区"时命中 0），需重试等待。**修复**：新增纯对象 `ComposerScripts`（可单测）统一构造注入脚本——选择器四级回退、contenteditable 走 `execCommand('insertText')`（派发 `beforeinput`，Lexical 据此同步内部状态；失败退回合成 `paste`）、回读走 `[data-lexical-text]` 并轮询 ≤2s、提交用带 `keyCode/which` 的 Enter 后轮询清空判 `submitted`、兜底点发送按钮（不用 class 通配）；结果语义扩为 `injected/submitted/blocked/notfound/failed`，仅后两者降级剪贴板+通知（不再"脚本已下发"即乐观提示）。`sendSelection` 与 `sendQuestion` 共用该脚本，`PendingSend` 增加 `kind` 区分回传处理。**验证**：headless Edge + CDP 在真实 dsh 0.1.5 页面上对照实测——`insertText` ✅（`execReturn=true`，立即回读命中）、合成 `beforeinput` ❌、纯改 DOM ❌、Enter 提交 501ms 内清空 ✅；新增 `ComposerScriptsTest`（11 例）锁定契约。测试 **194 项全部通过** |
 | 2026-09-17 | v0.2.4 | **dsh 配置共享化：修复"新模型 / API Key / Agent 预设重启后消失"**（用户实测驱动）。**根因三重（实测）**：① `DshHomeManager.ensureHome` 的 `copyGlobalConfigTo` 每次启动把共享根 `settings.yaml`/`.credentials.yaml` **`REPLACE_EXISTING` 覆盖**到每项目 DSH_HOME，而 dsh 的配置真源是 `$DSH_HOME`（`dsh-home-paths` 解析顺序：显式配置 > `$DSH_HOME` > `~/.dsh`；Web「Models」页写的 `llm-pi-ai`/`llm-deepseek`、语言 `locale` 都落项目子目录）→ 下次启动被清空；② 全局化用的 `- $settings:` / `- $credentials:` patch 语法**被 dsh 拒绝**：`dsh --profile web --patch <ide.yml> --dump-config` 报 `patch: id is required for non-insert patches`，整条 patch 被丢弃；③ `DshBridgeManager.writePatch()` 从未把共享根传给 `McpPatchGenerator`（`globalConfigDir` 走默认空值）。**方案（§4.4/§4.5）**：删除 `copyGlobalConfigTo`；patch 改 `- id: settings` / `- id: credentials` / `- id: agent-presets`（整份覆盖须重述必填 `default: standard`，并置 `includeUserRoot: false` 以免再扫 `$DSH_HOME/.agent-presets`）/ `- id: skill-filesystem`（`dshHome`）四段——共享面 = 设置文档 + 凭据 + Agent 预设 + 个人技能；数据面（`sessions`/`storages`/附件）仍按项目隔离（dsh 全库仅 `dshHomePath('sessions'\|'storages')` 两处）。**配套**：① 新增 `SharedConfigMigrator`（标记 `<共享根>/.plugin-layout-version`）——按顶层 namespace 与 `refs`/`records` 做**文本级**合并（共享侧优先、只补缺，保留注释/`!!js`；扁平凭据内联升级为 `version:1`），原文件移入 `<共享根>/migrated/<hash>/` 备份，逐项目失败降级且不写标记；② `syncCredentials()` 改 `YamlText.upsertRef` 合并写入（只替换 `refs.DEEPSEEK_API_KEY`，不再用扁平 layout 整份覆盖、不再抹掉 dsh 的 `records.client-connection/browser-session`）；③ `DshCredentialsSync` 废弃为空操作（dsh 与插件写同一份共享凭据）；④ **MCP 脚本零链接**：部署在 `<运行时根>/dsh/node_modules/@deepseek-ai/dsh-ide-bridge/`——Node 的 ESM 解析按**真实路径**查找、**不越过 junction**（实测放 `<运行时根>/.dsh-ide-bridge/` 会 `ERR_MODULE_NOT_FOUND`），故**删除每项目 `node_modules` junction**，`cleanLegacySharedRoot`/`cleanLegacyProjectHome` 清理历史残留；⑤ 设置页新增「共享配置目录」只读展示 + 打开按钮，API Key 回显改读共享文档的 `refs` 段。新增 `SharedConfigMigratorTest`（23 例）、重写 `McpPatchGeneratorTest`（11 例，含"绝不出现 `$id` 形态"回归断言）。**测试环境对齐**：`tooling/runtime-dev` 原为 dsh **0.1.1-rc.2**（与 `DSH_VERSION` 不一致，导致 2 个 workspace 冒烟长期失败：旧契约点号 RPC、启动 URL 无 token），已用 `build/runtime-win-x64.zip` 对齐到 **0.1.5-rc.2**（Node 22.23.2），旧树留作 `tooling/runtime-dev/{node,dsh}-0.1.1-backup`。测试 **194 项全部通过**（含 4 个真实 dsh 冒烟） |
+| 2026-10-18 | v0.2.5 | **dsh 插件包"装一次、多项目生效"（用户诉求：一个项目安装、所有项目生效）**。**根因**：dsh 从 `$DSH_HOME/profiles/<name>` 解析 profile（`dsh-app-boot` 的 `resolveProfileDir`），插件把 DSH_HOME 按项目隔离（v0.1.3-dev），于是 `dsh plugin --profile web add <pkg>` 只落在当前项目 → 插件包不共享（v0.2.4 共享的是**配置面**：settings/credentials/预设/技能）。**方案 A（已实测通过）**：把**每项目的 `<DSH_HOME>/profiles` 目录**链接到 `<共享根>/profiles`（Windows junction / 其它平台符号链接）——只共享 profile，`sessions`/`storages`/`attachments` 仍在各自 home，数据隔离不变（实测两实例并发正常、各写各家）。否决方案 B（全局化 DSH_HOME + patch 把数据面指回项目）：需覆盖 sessions/storages/attachments/spill 全部数据面，易遗漏。**新增**：① `SharedProfilesLink`（纯逻辑四态判定：不存在/真实目录/正确链接/指向别处 + 播种/回填清单 + 用户内容判定）；② `DshHomeManager.ensureProfiles`（建链/修链/迁移/关闭回填）——真实目录先播种共享（共享优先、只补缺）再**整目录移动**备份到 `<共享根>/profiles-migrated/<hash>/`（跨卷退到同父目录改名），建链失败**移回原处**；任何失败降级为"项目独立 profile"（dsh 对 profile 加载 fail-loud，绝不能让共享功能把 dsh 弄挂），原因经 `profilesState()` 呈现；`MIGRATED_PROFILES_DIR` 常量；③ 设置项 `shareDshProfiles`（默认 true）+ 主设置页勾选（改动后对已打开项目立刻重跑 `ensureHome`）；④ `DshProfileManifest`（**自研极简 JSON 读取器**，不引入第三方依赖；`Profile.entries()` 区分 bundle 插件与纯依赖；`validateSpec` 拒绝空白/shell 元字符/相对路径）；⑤ `DshPluginInstaller`（**转发给 dsh 自己的 `plugin` 子命令**而非直接调 pnpm——复用其 profile 初始化、相对规格锚定与 `reconcilePlugins`；PATH 里补 `<共享根>/plugin-tools/bin` 的**私有 pnpm**（运行时自带 npm 装 `pnpm@9.15.9`，shim 为 `pnpm.cmd`/shebang 脚本），不改用户全局环境；操作前备份 manifest/lockfile 到 `<共享根>/plugin-backups/<时间戳>/`，失败回滚；全局加锁串行化；`^` 版本范围在 Windows 自动加引号——实测不加引号会被 `cmd` 当转义符吃掉）；⑥ `DshPluginsConfigurable`（`id=dsh.plugins`，`parentId=dsh.settings`：项目选择 + 共享状态 + 插件表格 + 安装/卸载/本地目录/刷新/打开目录 + 命令输出区）+ 工具窗标题栏 `ManagePluginsAction`（dsh Web UI 无安装入口，`ui-settings-plugin-inventory` 只读）。**真实环境冒烟（本机实测）**：`dsh plugin --profile web add link:<本地插件>` → 包落进共享 profile、`bundles` 自动追加 `test-shared`；从**另一个** home（仅经 junction 指向共享 profiles）启动 dsh → 打印 `SHARED-PLUGIN-LOADED name=test-shared` 且 `dsh web` 正常出 token URL。新增 `SharedProfilesLinkTest`(11) / `DshProfileManifestTest`(14) / `DshPluginInstallerTest`(13)。测试 **232 项全部通过** |

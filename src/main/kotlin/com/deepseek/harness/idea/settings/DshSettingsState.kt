@@ -34,6 +34,16 @@ class DshSettingsState : PersistentStateComponent<DshSettingsState> {
     /** 高级：运行时下载读取超时（秒）；连接超时固定 60s。默认 600s，放宽以适配慢网络。 */
     var runtimeDownloadTimeoutSeconds: Int = 600
 
+    /**
+     * 是否把每个项目的 `<DSH_HOME>/profiles` 链接到共享 profile 根（v0.2.5，默认开启）。
+     *
+     * 开启时：在一个项目里 `dsh plugin --profile web add <pkg>` 装的插件，**所有项目**都能加载
+     * （profile 目录全局唯一）；会话/工作区/附件仍在各自 DSH_HOME，隔离不变。
+     * 关闭时：断链回到每项目独立 profile（共享根**不删**，已装的插件需在项目内重新安装 ——
+     * 见 `DshHomeManager.disableSharedProfiles` 的原因说明）。
+     */
+    var shareDshProfiles: Boolean = true
+
     var logLevel: String = "info"
 
     override fun getState(): DshSettingsState = this

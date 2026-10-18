@@ -65,13 +65,15 @@ tooling\gradle-8.14\bin\gradle.bat bundleRuntime
 
 ```
 src/main/kotlin/com/deepseek/harness/idea/
-├── runtime/   DshHomeManager(运行时/DSH_HOME/解压自举/全局配置+每项目副本) · DshProcessManager(进程+端口发现+重启)
+├── runtime/   DshHomeManager(运行时/DSH_HOME/解压自举/共享配置根/共享 profiles 链接) · DshProcessManager(进程+端口发现+重启)
 │             PortParser · DshCredentials(PasswordSafe + mask + 凭据文件兜底读取) · WorkspaceInitializer(默认工作区)
 │             LegacySessionMigrator(旧全局 session/投影缓存→隔离目录迁移) · DshCredentialsSync(Web UI 改 key→全局回写)
-│             DshRuntimeRegistry(并发≤3) · DshLifecycleManager / DshAppLifecycleListener(生命周期)
+│             SharedProfilesLink(profiles 链接四态判定) · DshRuntimeRegistry(并发≤3) · DshLifecycleManager / DshAppLifecycleListener(生命周期)
 ├── bridge/    IdeBridgeServer(HTTP+token) · DshBridgeManager(编排) · SentSelectionQueue(环形队列)
 │             IdeBridgeResources(读 mcp-ide-server.mjs)
 ├── mcp/       McpPatchGenerator(ide.yml patch)
+├── plugins/   DshProfileManifest(profile manifest 解析/规格校验) · DshPluginInstaller(转发 dsh plugin + 私有 pnpm)
+│             DshPluginsConfigurable(设置页「DSH 插件」)
 ├── review/    SnapshotManager(基线快照) · SnapshotDiff · ReviewManager
 ├── ui/        DshToolWindowFactory(工具窗口+JCEF+注入) · SendSelectionAction · ReviewChangesAction
 │             SendLogExplanationAction(运行日志一键解释) · ExplainLogComposer · DshLogPanel(日志页)
@@ -143,6 +145,44 @@ src/main/resources/
 | 2024.1 API 勘误 | 编译失败 | 见下表 |
 | 沙箱 spawn EPERM | npm/子进程 `spawn EPERM` | 沙箱禁管道 stdio；npm 用 `--ignore-scripts`（原生依赖预编译无需 postinstall），Node 子进程用 `stdio:'ignore'`+轮询端口 |
 | Gradle 缓存锁 | 见 §1 | `--no-daemon` + 杀残留 daemon |
+
+### v0.2.5 dsh 插件包共享（"装一次、多项目生效"：全链路冒烟实测）
+
+**问题**：dsh 从 `$DSH_HOME/profiles/<name>` 解析 profile（`dsh-app-boot.resolveProfileDir(name, home)` =
+`join(home, 'profiles', name)`），而本插件把 DSH_HOME 按项目隔离（`homeDir(projectPath)`），
+所以 `dsh plugin --profile web add <pkg>` 只装进当前项目 —— **插件包不跨项目**（v0.2.4 共享的是配置面）。
+
+**解法（实测通过）**：把**每项目的 `<DSH_HOME>/profiles` 目录**链接到 `<共享根>/profiles`
+（Windows `mklink /J` junction，其它平台符号链接）。只共享 profile，`sessions`/`storages`/`attachments`
+仍在各自 home → 数据隔离不变。实测两个 DSH_HOME 共用 profile（并发启动）均正常：
+插件都加载、数据各写各家、共享根未被数据污染。
+
+**冒烟脚本（本机可复现，纯 ASCII，避免 PS 5.1 的 GBK 解析坑）**：
+1. 建 `<shared>/profiles/web`（package.json 用 web 模板 bundles）+ `home-a`/`home-b` 里 `mklink /J .../profiles <shared>/profiles`；
+2. 私有 pnpm：`node <runtime>/node/node_modules/npm/bin/npm-cli.js install --prefix <shared>/plugin-tools pnpm@9.15.9 --no-audit --no-fund`；
+   shim `plugin-tools/bin/pnpm.cmd` 内容 `@"<node>" "<pnpm.cjs>" %*`，把该目录前置进 PATH；
+3. `DSH_HOME=<home-a> node <dsh>/lib/bin.js plugin --profile web add link:<本地插件绝对路径>`；
+4. 断言：包出现在 `<shared>/profiles/web/node_modules/`，且 `package.json` 的 `dsh.profile.bundles` 自动追加包名；
+5. `DSH_HOME=<home-b> node <dsh>/lib/bin.js --profile web --host 127.0.0.1 --port 0 --no-open` → 插件日志出现
+   （本次实测打印 `SHARED-PLUGIN-LOADED name=test-shared`）+ `dsh web: http://…/?token=…`。
+
+**关键事实/坑（均为实测）**：
+
+| 事项 | 结论 |
+|---|---|
+| `dsh plugin` 的本质 | pnpm 转发器（`lib/plugin-*.js` 的 `runPlugin`）：`initProfile` → `spawnSync("pnpm", args, {cwd: profileDir, shell: win32})` → `reconcilePlugins`。**PATH 里没有 pnpm 时返回 127** 并提示 "install pnpm" |
+| 谁写 `bundles` | dsh 自己。`reconcilePlugins` 按**实际装出来的包名**（`link:`/git/tarball 别名规格也正确）把"声明了 `dsh.bundle.patch` 的依赖"追加进 `dsh.profile.bundles`；纯库只打 warn 不加入 → 插件**不需要**自己写 manifest |
+| 启动命令顺序 | 正确：`dsh --profile web --host … --port 0`（`--profile` 是**启动器**选项，其后参数交给 app）。`dsh web --profile web` → `unknown option '--profile'`；`dsh --profile web web` → `web takes none of parent --profile…`。**别再传 `web` 子命令** |
+| patch 条目必须有 `name` | 只写 `id` 时 cordis loader 直接 fail-loud：`failed to import loader entry <id> (undefined): Cannot read properties of undefined (reading 'startsWith')` |
+| `shell: true` 的参数破坏 | Windows 上 dsh 用 `shell:true` 转发且 Node **不加引号**：`a b` → 两个参数；`a&b` → 只传进 `a` 且退出码非零；`pkg@^1.2.0` → `cmd` 把 `^` 当转义符吃掉变成 `pkg@1.2.0`。**加双引号可原样传入**（`"pkg@^1.2.0"` ✅、`"a b"` ✅）—— 故安装器对含 `^` 的规格在 Windows 自动加引号，其余空白/元字符一律在 UI 校验期拒绝 |
+| 相对路径规格 | `dsh plugin` 把 `.`/`../p`/`link:./p` 锚定到**调用进程的 cwd**；安装器以 profile 目录为 cwd → 会解析到 `<profile>/../…`。故 UI 只接受**绝对路径**（`link:/abs/path`） |
+| junction 判定 | `Files.exists(p, NOFOLLOW_LINKS)` + `attrs.isSymbolicLink \|\| attrs.isOther`；"指向是否正确"用 `toRealPath()` 比较；`Files.deleteIfExists(link)` 只删链接、**不动目标**（切记：递归删除含 junction 的目录会删空目标，见 §4 首行） |
+| 链接下的 profile 自愈 | dsh 的 `healProfilesModuleFallback` 维护 `profiles/node_modules` 共享 fallback（实测 240 个 `@deepseek-ai` 包），在 `profiles` 为链接时启动未报错 |
+| 卸载/失败回滚 | `node_modules` 不必回滚（manifest 未声明即不加载）；安装器只备份/回写 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml`、`pnpm-workspace.yaml` |
+
+**关闭共享时的语义（有意为之）**：只断链、**不回填**共享 profile 内容 —— 共享 `package.json` 的 `bundles`
+可能包含只装在共享 `node_modules` 里的插件，原样搬到独立目录会让 dsh fail-loud 起不来；共享根与会装插件保留不删，
+重新开启即恢复。
 
 ### v0.2.1（2026-09-02）首次使用运行时下载：失败修复 + 可靠性 + UX（发布条目）
 
@@ -599,11 +639,11 @@ x64 对应 `*-darwin-x64`）。
 
 | 层 | 类 | 说明 |
 |---|---|---|
-| 单元 | PortParserTest(4) / McpPatchGeneratorTest(6) / SnapshotDiffTest(5) / PathFiltersTest(5) / SentSelectionQueueTest(5) / WorkspaceInitializerTest(12) / DshRuntimeRegistryTest(3) / CredentialImporterTest(4) / **JsonCodecTest(v0.1.1,9)** / **ExplainLogComposerTest(v0.1.3-dev,4)** / **LegacySessionMigratorTest(v0.1.3-dev,14)** / **DshCredentialsMaskTest(v0.1.3-dev,10)** / **DshCredentialsSyncTest(v0.1.3-dev,5)** / **PlatformTest(v0.2.0,10)** / **RuntimeAssetsTest(v0.2.0,6)** / **RuntimeProvisionerTest(v0.2.0,7)** | 纯 JUnit，无 IDE 依赖 |
+| 单元 | PortParserTest(4) / McpPatchGeneratorTest(6) / SnapshotDiffTest(5) / PathFiltersTest(5) / SentSelectionQueueTest(5) / WorkspaceInitializerTest(12) / DshRuntimeRegistryTest(3) / CredentialImporterTest(4) / **JsonCodecTest(v0.1.1,9)** / **ExplainLogComposerTest(v0.1.3-dev,4)** / **LegacySessionMigratorTest(v0.1.3-dev,14)** / **DshCredentialsMaskTest(v0.1.3-dev,10)** / **DshCredentialsSyncTest(v0.1.3-dev,5)** / **PlatformTest(v0.2.0,10)** / **RuntimeAssetsTest(v0.2.0,6)** / **RuntimeProvisionerTest(v0.2.0,7)** / **SharedProfilesLinkTest(v0.2.5,11)** / **DshProfileManifestTest(v0.2.5,14)** / **DshPluginInstallerTest(v0.2.5,13)** | 纯 JUnit，无 IDE 依赖 |
 | 集成冒烟 | DshBootstrapSmokeTest(真实 dsh 启动 + workspace 注册断言) / DshMcpBridgeSmokeTest(mock bridge + MCP tools/list 6 工具 + failOnStartupError 严格启动) / WorkspaceInitializerSmokeTest(切换项目工作区顺序) / **LegacySessionMigratorSmokeTest(v0.1.3-dev：zstd session 迁移后 workspace.json 自动挂接)** | 需 `DSH_IDEA_RUNTIME`，否则跳过 |
 
 - 冒烟测试注意：临时 DSH_HOME 内 dsh 自愈 junction 指向 runtime → **tearDown 必须先 unlinkJunctions 再让 `@TempDir` 清理**，否则清空 runtime（见 §4）。
-- 测试计数：**122 个**（截至 v0.2.1，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），v0.2.1 新增用例未逐类复列——类覆盖以上表为准，**当前总数以 122 为准**。
+- 测试计数：**232 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 232 为准**。
 
 ---
 

@@ -26,6 +26,9 @@
             <li><b>Shared configuration across projects</b> — models, providers, API keys, agent presets and
             personal skills live in one shared config home, so configuring them once applies to every project;
             sessions, workspaces and attachments stay isolated per project.</li>
+            <li><b>dsh plugins, installed once</b> — install a dsh plugin package from the <i>DSH Plugins</i>
+            settings page and every project loads it (the profile is shared; project data is not). No global pnpm
+            needed — the plugin provisions its own.</li>
             <li><b>IDE context via MCP</b> — the agent can read your current editor selection, open
             files and project tree, and open/reveal files, through the <code>mcp__ide__*</code> tools.</li>
             <li><b>Send selection to DSH</b> — right-click any code selection to send a compact file
@@ -77,6 +80,8 @@
             新建、修改项目文件。</li>
             <li><b>配置跨项目共享</b> — 模型、供应商、API Key、Agent 预设与个人技能存放于统一的共享配置目录，
             配置一次即对所有项目生效；而会话、工作区与附件仍按项目隔离。</li>
+            <li><b>dsh 插件装一次即共享</b> — 在「DSH 插件」设置页安装 dsh 插件包，所有项目都会加载（profile 共享，
+            项目数据不共享）。无需用户全局安装 pnpm —— 插件会自备一份。</li>
             <li><b>MCP 桥接 IDE 上下文</b> — 智能体可通过 <code>mcp__ide__*</code> 工具读取当前
             选中代码、打开的文件、项目树，并打开/定位文件。</li>
             <li><b>发送选中代码到 DSH</b> — 右键选中代码即可发送紧凑文件引用
@@ -115,6 +120,33 @@
 
     <change-notes><![CDATA[
         <h3>English / 中文</h3>
+        <h4>v0.2.5</h4>
+        <ul>
+            <li><b>Install a dsh plugin package once and every project loads it.</b> Each project's
+            <code>profiles/</code> directory is now linked to a single shared profile root, so a package installed in
+            one project is visible to all of them. Sessions, workspaces and attachments still live in each project's
+            own DSH_HOME, so isolation is unchanged. Toggle it in <i>Settings → Tools → DeepSeek Harness</i>
+            ("Share dsh plugin packages across projects", on by default); existing per-project profiles are moved to
+            <code>&lt;shared home&gt;/profiles-migrated/</code> (never merged, never deleted) and the shared profile is
+            seeded from them first.</li>
+            <li><b>New "DSH Plugins" settings page and tool window action.</b> dsh's Web UI has no install entry point
+            (its plugin inventory is read-only), so the plugin now provides one: list installed plugins and plain
+            dependencies, install by package name or version range (e.g. <code>@scope/plugin@^1.2.0</code>) or from a
+            local folder, and remove. Installation forwards to dsh's own <code>dsh plugin --profile web add</code>
+            (pnpm under the hood); a private pnpm is provisioned once under
+            <code>&lt;shared home&gt;/plugin-tools/</code> so no global pnpm is required. The profile manifest is backed
+            up before each operation and restored if the command fails. Restart the harness to load or unload a plugin.</li>
+            <li><b>插件装一次，所有项目生效。</b>每个项目的 <code>profiles/</code> 目录现在链接到统一的共享 profile 根，
+            因此在一个项目中安装的插件对所有项目可见；会话、工作区与附件仍留在各自 DSH_HOME，隔离不变。可在
+            <i>设置 → Tools → DeepSeek Harness</i> 中用「跨项目共享 dsh 插件包」开关控制（默认开启）；既有的项目级
+            profile 会整体移动到 <code>&lt;共享根&gt;/profiles-migrated/</code>（不合并、不删除），并先用于播种共享
+            profile。</li>
+            <li><b>新增「DSH 插件」设置页与工具窗动作。</b>dsh Web UI 没有插件安装入口（清单只读），因此由插件提供：
+            列出已装插件与纯依赖，按包名/版本范围（如 <code>@scope/plugin@^1.2.0</code>）或本地目录安装，也可卸载。
+            安装转发给 dsh 自己的 <code>dsh plugin --profile web add</code>（底层 pnpm）；首次会在
+            <code>&lt;共享根&gt;/plugin-tools/</code> 下准备一份私有 pnpm，无需用户全局安装。每次操作前备份 profile
+            manifest、失败自动回滚。安装/卸载后需重启 Harness 生效。</li>
+        </ul>
         <h4>v0.2.4</h4>
         <ul>
             <li><b>Configuration is now shared across projects.</b> Models, providers, API keys, agent presets and
@@ -375,5 +407,14 @@
                                  id="dsh.settings"
                                  bundle="messages.DshBundle"
                                  key="settings.displayName"/>
+
+        <!-- v0.2.5：dsh 插件包安装/卸载页（子节点挂在 DeepSeek Harness 之下）。
+             dsh Web UI 没有插件安装入口（ui-settings-plugin-inventory 只读），
+             因此安装入口必须在插件侧提供。 -->
+        <applicationConfigurable parentId="dsh.settings"
+                                 instance="com.deepseek.harness.idea.plugins.DshPluginsConfigurable"
+                                 id="dsh.plugins"
+                                 bundle="messages.DshBundle"
+                                 key="plugins.displayName"/>
     </extensions>
 </idea-plugin>

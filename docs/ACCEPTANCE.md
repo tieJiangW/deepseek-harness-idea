@@ -1,10 +1,10 @@
-# PRD §7 验收清单走查（Step 5 起，随版本持续跟踪——当前 v0.2.4）
+# PRD §7 验收清单走查（Step 5 起，随版本持续跟踪——当前 v0.2.5）
 
-执行日期：2026-08-19 ｜ 最近复核：2026-09-17（v0.2.4：自动化测试 194/194 全部通过）｜ 依据：docs/PRD.md §7 成功标准
+执行日期：2026-08-19 ｜ 最近复核：2026-10-18（v0.2.5：自动化测试 232/232 全部通过）｜ 依据：docs/PRD.md §7 成功标准
 
 | # | 验收项 | 状态 | 验证方式 | 备注 |
 |---|---|---|---|---|
-| 1 | 从磁盘安装构建出的 zip 到独立 IDEA 2024.1–2026.2 实例，无报错 | ⏳ 手工 | `gradle buildPlugin` → `deepseek-harness-idea-0.2.4.zip`：**瘦身默认、不含运行时**（首启按平台下载并 SHA-256 校验，或经设置页「运行时目录」/「选择本地运行时 zip…」离线指定）；fat 备选 `-Pthin=false` ≈93–98MB | 本环境无法启动独立 IDE 会话；zip 结构已验证（plugin.jar + kotlin-stdlib + annotations）；2024.x 描述符问题已修（v0.2.2）；v0.2.3 已上传 JetBrains Marketplace（update id 1171727） |
+| 1 | 从磁盘安装构建出的 zip 到独立 IDEA 2024.1–2026.2 实例，无报错 | ⏳ 手工 | `gradle buildPlugin` → `deepseek-harness-idea-0.2.5.zip`：**瘦身默认、不含运行时**（首启按平台下载并 SHA-256 校验，或经设置页「运行时目录」/「选择本地运行时 zip…」离线指定）；fat 备选 `-Pthin=false` ≈93–98MB | 本环境无法启动独立 IDE 会话；zip 结构已验证（plugin.jar + kotlin-stdlib + annotations）；2024.x 描述符问题已修（v0.2.2）；v0.2.4 已上传 JetBrains Marketplace（update id 1174317） |
 | 2 | 设置页填入 API Key 后工具窗口内可对话；智能体可读项目文件 | ⏳ 手工 | 需真实 API Key + IDE 会话 | 凭据链路已自动化（PasswordSafe → **共享**凭据文件，v0.2.4 起 dsh 与插件写同一份）；脱敏回显 + 合并式写入（保留 `records` 与其它 provider `refs`）。dsh 0.1.5 起启动 URL 带鉴权 token，鉴权/cookie 链路已有冒烟覆盖 |
 | 3 | 指示智能体"新建 `src/Hello.java`"，文件出现在项目树并可打开 | ⏳ 手工 | 真实对话 | 底层已就绪：dsh cwd=项目根 + fs 工具 |
 | 4 | 指示智能体修改某文件，审查面板出现 diff，还原后恢复 | ✅ 自动（逻辑层） | `SnapshotDiffTest`、`ReviewManager` 三类还原（MODIFIED 覆盖 / NEW 删除 / DELETED 重建） | UI 交互（DiffManager 面板）需 IDE 会话手工确认 |
@@ -16,22 +16,20 @@
 | 10 | 设置页「运行时下载地址」反显当前生效值 + 「默认」按钮；「运行时目录」可指定且「默认」按钮填入插件默认目录 | ✅ 自动（逻辑层） | `DshHomeManagerRuntimeRootTest`（优先级与路径等价、共享根解析）、`RuntimeAssetsTest`（含直连文件 URL 用例） | UI 交互需 IDE 会话确认 |
 | 11 | **在一个项目新增自定义模型/provider 后重启 IDEA，配置仍在；其它项目同样可见** | ✅ 自动（迁移与 patch 层）+ ⏳ 手工 | `McpPatchGeneratorTest`（四段 patch 指向共享根）、`SharedConfigMigratorTest`（按 namespace 合并与备份）、`DshMcpBridgeSmokeTest`（真实 dsh 不写项目级配置文件） | **v0.2.4 核心修复**；端到端"Web UI 加模型 → 重启 → 仍在"仍需真实 IDE 会话确认（见「需人工确认」第 10 项） |
 | 12 | Agent 预设与个人技能跨项目共享 | ✅ 自动（patch 层）+ ⏳ 手工 | `McpPatchGeneratorTest`（`agent-presets` 重述 `default` + `includeUserRoot: false`、`skill-filesystem.dshHome`） | 需真实会话确认创建/删除预设可用（`copy()`/`remove()` 只认第一个 user 根） |
+| 13 | **在一个项目安装 dsh 插件包，其它项目也加载** | ✅ 自动（链接层 + 真实 dsh 冒烟） | `SharedProfilesLinkTest`（四态判定，真实 junction）、`DshPluginInstallerTest`（参数/私有 pnpm/备份）、`DshProfileManifestTest`（manifest 与规格校验）+ **真实 dsh 冒烟**（本机实测：`dsh plugin --profile web add link:<插件>` 落进共享 profile 且 `bundles` 自动追加；从另一个 DSH_HOME 启动打印 `SHARED-PLUGIN-LOADED`） | v0.2.5 核心；UI 交互（设置页「DSH 插件」+ 工具窗动作）需 IDE 会话手工确认（见「需人工确认」第 12 项） |
 
 ## 自动化测试覆盖合计
 
-- **合计 194 项全部通过（0 失败 / 0 跳过）**；其中集成冒烟 4 项（真实 dsh 0.1.5-rc.2 运行时）：
+- **合计 232 项全部通过（0 失败 / 0 跳过）**；其中集成冒烟 4 项（真实 dsh 0.1.5-rc.2 运行时）：
   `DshBootstrapSmokeTest`（启动 + 端口 + workspace 注册）、`DshMcpBridgeSmokeTest`（7 工具 + 严格 patch 启动 + 共享配置落盘）、
   `WorkspaceInitializerSmokeTest`（切换项目置顶）、`LegacySessionMigratorSmokeTest`（zstd session 迁移 + workspace 挂接）
-- 版本演进：36（Step 0–5）→ 45（v0.1.1）→ 90（v0.1.3-dev）→ 113（v0.2.0）→ 122（v0.2.1）→ 130（v0.2.3）→ **194（v0.2.4）**
-- v0.2.4 新增/扩充：`SharedConfigMigratorTest`（23 例：`YamlText` 顶层键/段落切分、按 namespace 合并、扁平凭据升级、
-  `refs`/`records` 补缺、端到端迁移与备份、幂等标记、种子选择、失败隔离、`upsertRef`/`hasRef`）、
-  `ComposerScriptsTest`（11 例：注入脚本契约——Lexical 选择器、`insertText` 写入、`[data-lexical-text]` + 轮询回读、
-  Enter 自动提交、发送按钮选择器不误点"停止"、无回传通道形态）、
-  `SendSelectionRefsTest`（12 例：紧凑引用构造 + 同一引用短时间窗判重——含窗口边界、时间回拨、空引用）、
-  `McpPatchGeneratorTest`（重写为 11 例，含"绝不出现 `$settings` 形态"的回归断言）、
-  `DshHomeManagerRuntimeRootTest`（新增 `resolveSharedConfigRoot` 与项目目录名模式）、
-  `DshCredentialsSyncTest`（新增"`register` 为空操作""不再写共享凭据"）、
-  `DshMcpBridgeSmokeTest`（新增 ESM 解析探针 + 项目 DSH_HOME 无 `node_modules`/配置文件断言）
+- 版本演进：36（Step 0–5）→ 45（v0.1.1）→ 90（v0.1.3-dev）→ 113（v0.2.0）→ 122（v0.2.1）→ 130（v0.2.3）→ 194（v0.2.4）→ **232（v0.2.5）**
+- v0.2.5 新增：`SharedProfilesLinkTest`（11 例：链接四态——不存在/真实目录/正确链接/指向别处/目标未建，
+  播种与回填清单，`hasUserContent` 的 `node_modules` 与 patch `insert` 判定）、
+  `DshProfileManifestTest`（14 例：真实 pnpm/dsh manifest 形状、转义与非字符串字段、损坏/空输入降级为 EMPTY、
+  插件与纯依赖分类、规格校验——空 / `-` 开头 / 空白与 shell 元字符 / 相对路径 / `^` 需加引号）、
+  `DshPluginInstallerTest`（13 例：`dsh plugin` 参数拼装与引号、私有 pnpm 落点、shim 名、PATH 前置与 Windows `Path` 归一、
+  备份清单与时间戳、profile 读取与缺省）
 
 ## 需人工 IDE 会话确认的项
 
@@ -55,12 +53,22 @@
     （除 dsh 自愈的 `profiles/node_modules`），且 `mcp__ide__*` 工具可调用。
 11. 首次升级到 v0.2.4 时的迁移体验：日志应出现 `shared-config migration: …`，`<共享根>/migrated/<hash>/` 下能看到被移走的
     旧项目级 `settings.yaml` / `.credentials.yaml`；若迁移失败则不写 `.plugin-layout-version` 并在下次启动重试。
+12. **v0.2.5 dsh 插件安装 UI 端到端**（最高优先）：① 打开项目 A 的工具窗标题栏「DSH 插件」动作 → 设置页显示
+    `profile 目录` 已指向 `<共享根>/profiles/web`、共享状态为"已开启"；② 输入一个真实插件包名（如带 `^` 版本范围）
+    点「安装」→ 出现 pnpm 输出、表格新增该插件、「重启 Harness」后插件生效（可看 DSH Log 或插件自身日志）；
+    ③ 打开项目 B，同一插件已在列表中（无需重装）；④ 在 B 中「卸载」→ 重启后 A 也不再有该插件（共享的必然结果）；
+    ⑤ 取消勾选「跨项目共享 dsh 插件包」→ A/B 的 `profiles` 变回真实目录（`dir` 可见），共享根与
+    `<共享根>/profiles` **未被删除**；重新勾选后恢复共享且插件仍在。
+13. 首次升级到 v0.2.5 时的迁移体验：若某项目此前装过插件（`profiles/web/node_modules` 存在），日志应出现
+    `migrated the project profile to the shared root: backup=…`，`<共享根>/profiles-migrated/<hash>/` 下能看到被移走的
+    整份旧 profile（**未合并**，以共享根为准）；链接建立失败时该项目应继续用独立 profile（设置页显示原因）、dsh 仍能启动。
 
-## 结论（更新至 v0.2.4）
+## 结论（更新至 v0.2.5）
 
-- 手工验收项（安装 / 真实对话 / diff UI / 注入效果 / 进程清理 / **配置共享化端到端**）仍需真实 IDE 会话闭环，
-  已归档为 [MILESTONE_REVIEW.md](./MILESTONE_REVIEW.md) 的遗留问题 A 类。
-- 自动化（逻辑层）验收项 4/6/8、第 5 项链路（含真实页面实测）、第 11/12 项的 patch 与迁移层，加上 v0.1.3-dev 起的迁移/全局 key 与
-  v0.2.x 的运行时供应/下载/鉴权/配置共享/Lexical 注入适配，在 **194/194（v0.2.4，全部通过）** 测试中持续守护。
-- 插件 v0.2.3 已发布：GitHub Release（11 个资产：插件 zip + 5 平台运行时及 `.sha256`）+
-  JetBrains Marketplace update **1171727**（待审核）。v0.2.4 待发布。
+- 手工验收项（安装 / 真实对话 / diff UI / 注入效果 / 进程清理 / **配置共享化端到端** / **插件安装 UI 端到端**）
+  仍需真实 IDE 会话闭环，已归档为 [MILESTONE_REVIEW.md](./MILESTONE_REVIEW.md) 的遗留问题 A 类。
+- 自动化（逻辑层）验收项 4/6/8、第 5 项链路（含真实页面实测）、第 11/12 项的 patch 与迁移层、第 13 项的链接层与
+  真实 dsh 安装/加载冒烟，加上 v0.1.3-dev 起的迁移/全局 key 与 v0.2.x 的运行时供应/下载/鉴权/配置共享/Lexical 注入适配，
+  在 **232/232（v0.2.5，全部通过）** 测试中持续守护。
+- 插件 v0.2.4 已发布：GitHub Release（11 个资产：插件 zip + 5 平台运行时及 `.sha256`）+
+  JetBrains Marketplace update **1174317**（待审核）。v0.2.5 待发布。

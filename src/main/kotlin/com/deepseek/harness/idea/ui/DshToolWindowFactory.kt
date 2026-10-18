@@ -73,6 +73,7 @@ class DshToolWindowFactory : ToolWindowFactory {
         toolWindow.setTitleActions(
             listOf(
                 OpenSettingsAction(),
+                ManagePluginsAction(),
                 OpenBrowserAction(panel),
                 ReviewChangesAction(),
                 RestartAction(panel)
@@ -852,6 +853,26 @@ private class PendingSend(val token: Long, val text: String, val kind: String)
 class OpenSettingsAction : AnAction(DshBundle.message("action.settings"), null, com.intellij.icons.AllIcons.General.Settings) {
     override fun actionPerformed(e: AnActionEvent) {
         ShowSettingsUtil.getInstance().showSettingsDialog(e.project, DshSettingsConfigurable::class.java)
+    }
+}
+
+/**
+ * 工具窗标题栏动作：打开「DSH Plugins」设置页（v0.2.5）。
+ *
+ * 安装 dsh 插件包 = `dsh plugin --profile web add <pkg>`，dsh Web UI 里**没有**安装入口
+ * （`ui-settings-plugin-inventory` 是只读清单），所以入口放在这里。
+ */
+class ManagePluginsAction : AnAction(
+    DshBundle.message("action.plugins"),
+    DshBundle.message("action.plugins.hint"),
+    com.intellij.icons.AllIcons.Nodes.Plugin,
+) {
+    override fun update(e: AnActionEvent) {
+        e.presentation.isEnabled = true
+    }
+
+    override fun actionPerformed(e: AnActionEvent) {
+        ShowSettingsUtil.getInstance().showSettingsDialog(e.project, com.deepseek.harness.idea.plugins.DshPluginsConfigurable::class.java)
     }
 }
 

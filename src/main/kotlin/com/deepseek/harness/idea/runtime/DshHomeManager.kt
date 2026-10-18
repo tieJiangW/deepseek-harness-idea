@@ -6,10 +6,13 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
+import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.util.concurrent.TimeUnit
 
 /**
  * DSH 运行时与 DSH_HOME 管理（应用级服务）。
@@ -67,6 +70,15 @@ class DshHomeManager : Disposable {
          * ② `<dsh 树>/node_modules`（真正命中的一级）——解析稳定，且全局只有一份脚本、**零链接**。
          */
         const val MCP_BRIDGE_PACKAGE = "dsh-ide-bridge"
+
+        /**
+         * 项目 profile 被迁移到共享根后的备份目录名（相对 `<共享根>`）。
+         *
+         * 迁移只做**整目录移动备份**、不做逐文件合并：项目原 `profiles/web` 里可能有人工
+         * `pnpm add` 的依赖（`node_modules`，动辄上百 MB 且与 pnpm 存储层耦合），
+         * 合并语义无法安全定义，因此一律保留原物、以共享根为准。
+         */
+        const val MIGRATED_PROFILES_DIR = "profiles-migrated"
 
         private val WEB_PROFILE_MANIFEST =
             """{"name":"dsh-profile-web","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}"""
@@ -302,6 +314,32 @@ class DshHomeManager : Disposable {
     /** 共享用户技能根：`<共享根>/skills`（dsh `dsh-skill-filesystem` 的 `dshHome` 下 skills）。 */
     fun sharedSkillsRoot(): Path = sharedConfigRoot().resolve("skills")
 
+    /**
+     * 共享 dsh profile 根：`<共享根>/profiles`（v0.2.5）。
+     *
+     * 每项目的 `<DSH_HOME>/profiles` 是指向这里的链接（见 [ensureProfiles]），因此
+     * `dsh plugin --profile web add <pkg>` 装一次即对**所有项目**生效；而
+     * `sessions`/`storages`/`attachments` 仍在各自 DSH_HOME，数据隔离不变。
+     */
+    fun sharedProfilesRoot(): Path = sharedConfigRoot().resolve("profiles")
+
+    /** 某项目 profile 共享状态（供设置页展示）。 */
+    data class ProfilesState(val shared: Boolean, val reason: String? = null)
+
+    /**
+     * 当前项目的 profile 是否已共享到共享根（只看现状，不产生副作用）。
+     * @return `shared=true` 表示链接正确；否则 [ProfilesState.reason] 给出原因。
+     */
+    fun profilesState(projectPath: String): ProfilesState {
+        val project = homeDir(projectPath).resolve("profiles")
+        return when (SharedProfilesLink.state(project, sharedProfilesRoot())) {
+            SharedProfilesLink.State.CORRECT_LINK -> ProfilesState(true)
+            SharedProfilesLink.State.ABSENT -> ProfilesState(false, "not-created")
+            SharedProfilesLink.State.WRONG_LINK -> ProfilesState(false, "link-points-elsewhere")
+            SharedProfilesLink.State.REAL_DIR -> ProfilesState(false, "independent-directory")
+        }
+    }
+
     /** 每项目 DSH_HOME：`<共享根>/<md5(项目路径)前16位>`（数据面隔离，见类注释）。 */
     fun homeDir(projectPath: String): Path {
         val safe = if (projectPath.isBlank()) "default" else md5(projectPath).take(16)
@@ -347,6 +385,8 @@ class DshHomeManager : Disposable {
 
         // 每项目 DSH_HOME（数据面）
         val home = homeDir(projectPath)
+        // v0.2.5：把 profiles 链接到共享根 —— dsh 插件「装一次、多项目生效」；数据面仍留在本项目 home
+        ensureProfiles(home, projectPath)
         val web = home.resolve("profiles/web")
         Files.createDirectories(web)
 
@@ -359,6 +399,174 @@ class DshHomeManager : Disposable {
         prefillAcknowledgeWelcomeNotice()
         migrateLegacySessions(home, projectPath)
         return home
+    }
+
+    // ---- 共享 dsh profile（v0.2.5：插件「装一次、多项目生效」） ----
+
+    /**
+     * 确保本项目的 `profiles` 指向共享 profile 根（[sharedProfilesRoot]）。
+     *
+     * **为什么只链接 `profiles`**：dsh 把插件包装进 `$DSH_HOME/profiles/<name>/node_modules`，
+     * 而 `sessions`/`storages`/`attachments` 也在 `$DSH_HOME` 下。只链接 `profiles` 即可让
+     * `dsh plugin … add <pkg>` 装一次对所有项目生效，同时**不**改动数据面隔离
+     * （已实测：两个 DSH_HOME 共用 profile 时数据各落各家，并发亦正常）。
+     *
+     * 分支：开关关闭 → [disableSharedProfiles]；链接正确 → 无操作；不存在 → 建链；
+     * 链接指向别处 → 断链重建；真实目录 → [migrateAndLink]（播种 + 备份 + 建链）。
+     *
+     * **兜底原则**：任何一步失败都降级为"项目独立 profile"并只记日志 —— 共享插件是增强能力，
+     * 绝不能让 dsh 因此起不来（dsh 对 profile 加载失败是 fail-loud）。失败原因由
+     * [profilesState] 呈现给设置页，用户可重试。
+     */
+    private fun ensureProfiles(home: Path, projectPath: String) {
+        val project = home.resolve("profiles")
+        val shared = sharedProfilesRoot()
+        val enabled = com.deepseek.harness.idea.settings.DshSettingsState.getInstance().shareDshProfiles
+        try {
+            if (!enabled) {
+                disableSharedProfiles(home)
+                return
+            }
+            Files.createDirectories(shared)
+            when (SharedProfilesLink.state(project, shared)) {
+                SharedProfilesLink.State.CORRECT_LINK -> Unit
+                // 共享根的 profile 骨架由本方法返回后的 writeIfAbsent 播种（首个项目即建好）
+                SharedProfilesLink.State.ABSENT -> createProfilesLink(project, shared)
+                SharedProfilesLink.State.WRONG_LINK -> {
+                    deleteLink(project)
+                    createProfilesLink(project, shared)
+                }
+                SharedProfilesLink.State.REAL_DIR -> migrateAndLink(project, shared, projectPath)
+            }
+        } catch (e: Exception) {
+            LOG.warn(
+                "failed to share dsh profiles for $projectPath; the project keeps its own profile " +
+                    "(dsh plugins installed for other projects will not be visible here)",
+                e,
+            )
+        }
+    }
+
+    /**
+     * 把项目侧**真实目录**的 `profiles` 迁到共享根并改建链接。
+     *
+     * 步骤（顺序不可颠倒）：
+     * 1. 用项目 profile 里的默认文件给共享 profile **播种**（共享已有则保留 —— 共享是唯一真源，
+     *    绝不用旧项目的副本覆盖别的项目已装的插件）；
+     * 2. **整目录移动**备份到 `<共享根>/profiles-migrated/<项目 home 名>/`（同卷为 rename，几乎零成本）；
+     * 3. 建链接；建链失败则把备份移回原位，让本项目继续用独立 profile。
+     *
+     * **不做逐文件合并**：项目 `node_modules` 是 pnpm 布局（`.pnpm` store + 大量内部链接），
+     * 与 store 硬链接耦合，合并语义无法安全定义；而 `sessions` 等数据在 home 层、不受影响。
+     * 因此一律"整目录留档、以共享根为准"，并把留档路径写进日志供用户找回。
+     */
+    private fun migrateAndLink(project: Path, shared: Path, projectPath: String) {
+        val projectWeb = project.resolve(SharedProfilesLink.PROFILE_NAME)
+        val sharedWeb = shared.resolve(SharedProfilesLink.PROFILE_NAME)
+        val userContent = SharedProfilesLink.hasUserContent(projectWeb)
+        Files.createDirectories(sharedWeb)
+
+        SharedProfilesLink.filesToSeed(projectWeb, sharedWeb).forEach { name ->
+            runCatching {
+                Files.copy(projectWeb.resolve(name), sharedWeb.resolve(name), StandardCopyOption.COPY_ATTRIBUTES)
+                LOG.info("seeded shared profile file from project: $name -> $sharedWeb")
+            }.onFailure { LOG.warn("failed to seed shared profile file $name", it) }
+        }
+
+        val stamp = java.time.LocalDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+        val homeName = homeDir(projectPath).fileName.toString()
+        var backup = sharedConfigRoot().resolve(MIGRATED_PROFILES_DIR).resolve(homeName)
+        if (Files.exists(backup, LinkOption.NOFOLLOW_LINKS)) backup = backup.resolveSibling("$homeName-$stamp")
+
+        val movedTo = when {
+            moveDir(project, backup) -> backup
+            // 跨卷/被占用：退到同一父目录内改名（同样是 rename，不复制 node_modules）
+            moveDir(project, project.resolveSibling("profiles.migrated-$stamp")) ->
+                project.resolveSibling("profiles.migrated-$stamp")
+            else -> null
+        }
+        if (movedTo == null) {
+            // 原目录还在：不建链，保持独立（否则链接会遮住用户的真实 profile）
+            LOG.warn("could not back up the project profile at $project; keeping the project-local profile")
+            return
+        }
+
+        val linked = runCatching { createProfilesLink(project, shared) }.isSuccess
+        if (!linked) {
+            runCatching { Files.move(movedTo, project) }
+                .onFailure { LOG.warn("failed to restore the project profile from $movedTo; it is still there", it) }
+            LOG.warn("failed to link $project -> $shared; restored the project-local profile and its plugins")
+            return
+        }
+        LOG.info(
+            "migrated the project profile to the shared root: backup=$movedTo" +
+                if (userContent) " (contained installed packages / custom patch layers; kept as backup, not merged)" else "",
+        )
+    }
+
+    /**
+     * 关闭共享（设置项 `shareDshProfiles=false`）：断链，让本项目回到独立 profile。
+     *
+     * **不回填共享 profile 的内容**：共享 `package.json` 里的 `dsh.profile.bundles` 可能包含
+     * 只在共享 `node_modules` 里装过的插件，原样搬到独立目录会让 dsh **fail-loud** 起不来。
+     * 因此这里只断链，骨架由 [ensureHome] 后续的 `writeIfAbsent` 按新建 profile 播种；
+     * 共享根**不删**（用户的插件包与其它项目的共享关系原样保留），用户在设置页重新打开开关
+     * 即可恢复，或在独立 profile 里重新 `dsh plugin add`。
+     */
+    private fun disableSharedProfiles(home: Path) {
+        val project = home.resolve("profiles")
+        if (!SharedProfilesLink.isLink(project)) return
+        deleteLink(project)
+        Files.createDirectories(project)
+        LOG.info(
+            "shared dsh profiles disabled: unlinked $project; the shared root " +
+                "(${sharedProfilesRoot()}) is kept intact — per-project plugins must be installed again",
+        )
+    }
+
+    /** 建目录链接：Windows 用 junction（`mklink /J`，无需管理员、支持跨卷），其它平台用符号链接。 */
+    private fun createProfilesLink(link: Path, target: Path) {
+        Files.createDirectories(link.parent)
+        Files.createDirectories(target)
+        if (Platform.current().os == Platform.Os.WINDOWS) {
+            if (Files.exists(link, LinkOption.NOFOLLOW_LINKS)) {
+                throw IOException("$link already exists; refusing to create a junction")
+            }
+            val process = ProcessBuilder("cmd", "/c", "mklink", "/J", link.toString(), target.toString())
+                .redirectErrorStream(true)
+                .start()
+            val done = process.waitFor(15, TimeUnit.SECONDS)
+            val out = runCatching { process.inputStream.bufferedReader().readText().trim() }.getOrDefault("")
+            if (!done) runCatching { process.destroyForcibly() }
+            if (!done || !Files.exists(link, LinkOption.NOFOLLOW_LINKS)) {
+                throw IOException("mklink /J failed ($link -> $target): $out")
+            }
+            LOG.info("linked the project profiles to the shared root (junction): $link -> $target")
+        } else {
+            Files.createSymbolicLink(link, target)
+            LOG.info("linked the project profiles to the shared root (symlink): $link -> $target")
+        }
+    }
+
+    /** 断链接（只删链接本身，**绝不**递归删除目标内容 —— 否则会删空共享根里所有插件）。 */
+    private fun deleteLink(link: Path) {
+        if (!SharedProfilesLink.isLink(link)) return
+        runCatching {
+            Files.deleteIfExists(link)
+            LOG.info("removed the profiles link: $link")
+        }.onFailure { LOG.warn("failed to remove the profiles link at $link", it) }
+    }
+
+    /** 移动目录（同卷 rename）；任一步失败返回 false，由调用方决定兜底。 */
+    private fun moveDir(from: Path, to: Path): Boolean = try {
+        Files.createDirectories(to.parent)
+        Files.move(from, to)
+        LOG.info("moved the project profile directory: $from -> $to")
+        true
+    } catch (e: Exception) {
+        LOG.warn("failed to move $from -> $to", e)
+        false
     }
 
     /**

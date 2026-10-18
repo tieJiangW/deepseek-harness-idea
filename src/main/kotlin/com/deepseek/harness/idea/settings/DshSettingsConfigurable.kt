@@ -39,6 +39,7 @@ class DshSettingsConfigurable : SearchableConfigurable {
     private var runtimeDownloadField: JBTextField? = null
     private var runtimeDirField: TextFieldWithBrowseButton? = null
     private var timeoutField: JBTextField? = null
+    private var shareProfilesCheckBox: javax.swing.JCheckBox? = null
     private var runtimeStatus: JBLabel? = null
     private var importStatus: JBLabel? = null
 
@@ -210,6 +211,16 @@ class DshSettingsConfigurable : SearchableConfigurable {
             add(openSharedButton, BorderLayout.EAST)
         }
 
+        // 共享 dsh 插件（v0.2.5）：把每项目的 profiles 链接到共享 root/profiles，
+        // 使 `dsh plugin add` 装一次对所有项目生效（数据面仍在各自 DSH_HOME）。
+        val shareProfiles = javax.swing.JCheckBox(
+            DshBundle.message("settings.shareProfiles.label"),
+            state.shareDshProfiles,
+        ).apply {
+            toolTipText = DshBundle.message("settings.shareProfiles.hint")
+        }
+        shareProfilesCheckBox = shareProfiles
+
         return FormBuilder.createFormBuilder()
             .addLabeledComponent(JBLabel(DshBundle.message("settings.apiKey.label")), apiKey, 1, false)
             .addLabeledComponent(JBLabel(DshBundle.message("settings.model.label")), model, 1, false)
@@ -222,6 +233,8 @@ class DshSettingsConfigurable : SearchableConfigurable {
             .addComponent(localRow)
             .addLabeledComponent(JBLabel(DshBundle.message("settings.runtimeDownload.timeout.label")), timeout, 1, false)
             .addLabeledComponent(JBLabel(DshBundle.message("settings.sharedHome.label")), sharedRow, 1, false)
+            .addComponent(shareProfiles)
+            .addComponent(JBLabel(DshBundle.message("settings.shareProfiles.hint")))
             .addComponent(JBLabel(DshBundle.message("settings.apply.note")))
             .addVerticalGap(8)
             .panel
@@ -242,7 +255,8 @@ class DshSettingsConfigurable : SearchableConfigurable {
         return state.model != model || state.baseUrl != baseUrlField?.text?.trim().orEmpty() ||
             state.logLevel != logLevel || state.runtimeDownloadUrl?.trim().orEmpty() != downloadOverride ||
             state.runtimeDirectory?.trim().orEmpty() != dirOverride ||
-            state.runtimeDownloadTimeoutSeconds != timeout || apiKeyChanged()
+            state.runtimeDownloadTimeoutSeconds != timeout || apiKeyChanged() ||
+            state.shareDshProfiles != (shareProfilesCheckBox?.isSelected ?: state.shareDshProfiles)
     }
 
     /** 用户是否改了 API Key（字段内容 ≠ 当前脱敏回显，即为新值）。 */
@@ -269,6 +283,19 @@ class DshSettingsConfigurable : SearchableConfigurable {
         state.runtimeDownloadTimeoutSeconds =
             (timeoutField?.text?.trim()?.toIntOrNull() ?: state.runtimeDownloadTimeoutSeconds).coerceIn(30, 100_000)
 
+        // 共享 dsh 插件：变更后立刻对所有已打开项目重跑 ensureHome（建链/断链），
+        // 否则要等下次打开项目才生效。运行中的 dsh 会话仍持有旧 profile 目录，需重启后生效。
+        val shareChanged = shareProfilesCheckBox?.isSelected != state.shareDshProfiles
+        state.shareDshProfiles = shareProfilesCheckBox?.isSelected ?: state.shareDshProfiles
+        if (shareChanged) {
+            val paths = com.intellij.openapi.project.ProjectManager.getInstance().openProjects
+                .filterNot { it.isDefault }
+                .mapNotNull { it.basePath }
+            ApplicationManager.getApplication().executeOnPooledThread {
+                paths.forEach { runCatching { DshHomeManager.getInstance().ensureHome(it) } }
+            }
+        }
+
         // 仅当用户实际输入了新 key（而非脱敏回显原样）才写回，避免把脱敏串当 key 保存。
         val key = apiKeyField?.text?.trim().orEmpty()
         if (key.isNotEmpty() && key != DshCredentials.maskApiKey(storedApiKey)) {
@@ -293,6 +320,7 @@ class DshSettingsConfigurable : SearchableConfigurable {
         runtimeDirField?.text = state.runtimeDirectory?.trim()?.takeIf { it.isNotEmpty() }
             ?: runCatching { DshHomeManager.getInstance().defaultRuntimeRoot().toString() }.getOrNull().orEmpty()
         timeoutField?.text = state.runtimeDownloadTimeoutSeconds.toString()
+        shareProfilesCheckBox?.isSelected = state.shareDshProfiles
         storedApiKey = readStoredApiKey()
         apiKeyField?.text = DshCredentials.maskApiKey(storedApiKey)
         importStatus?.text = " "
