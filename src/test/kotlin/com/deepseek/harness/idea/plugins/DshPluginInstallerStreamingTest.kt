@@ -220,6 +220,71 @@ class DshPluginInstallerStreamingTest {
     }
 
     @Test
+    fun `a failing remove falls back to editing the profile manifest`() {
+        val shared = sharedRoot()
+        presetPnpm(shared)
+        // profile 里声明了 dshmarket，且 bundles 里有它
+        val declared = """
+            {
+              "name": "dsh-profile-web",
+              "dependencies": { "dshmarket": "^1.66.37", "keep": "1.0.0" },
+              "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "dshmarket", "keep"] } }
+            }
+        """.trimIndent()
+        val home = projectHome(declared)
+        val web = home.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME)
+        // 模拟"pnpm 删不掉文件"（运行中的 dsh 占用 node_modules）：
+        // 假 dsh 直接以 1 退出，也不改 manifest —— 兜底必须自己完成卸载
+        val script = fakeDsh("process.exit(1);")
+
+        val outcome = DshPluginInstaller.run(
+            projectHome = home,
+            sharedRoot = shared,
+            nodeExe = nodeExe(),
+            dshBin = script,
+            action = "remove",
+            spec = "dshmarket",
+        )
+
+        assertTrue(outcome.ok, "the manifest fallback should make the uninstall succeed; output:\n${outcome.output}")
+        assertTrue(outcome.output.contains("note:"), "the outcome should explain the fallback:\n${outcome.output}")
+        val text = Files.readString(web.resolve(DshProfileManifest.FILE_NAME), StandardCharsets.UTF_8)
+        assertFalse(
+            DshPluginManifestEditor.stillDeclares(text, "dshmarket"),
+            "dshmarket must be gone from the manifest after the fallback:\n$text",
+        )
+        val profile = DshProfileManifest.parse(text)
+        assertEquals(listOf("@deepseek-ai/dsh-base", "keep"), profile.bundles)
+        assertEquals(listOf("keep"), profile.dependencies.keys.toList())
+    }
+
+    @Test
+    fun `a failing add is not silently "fixed"`() {
+        val shared = sharedRoot()
+        presetPnpm(shared)
+        val home = projectHome(manifest)
+        val script = fakeDsh("process.exit(1);")
+
+        val outcome = DshPluginInstaller.run(
+            projectHome = home,
+            sharedRoot = shared,
+            nodeExe = nodeExe(),
+            dshBin = script,
+            action = "add",
+            spec = "dshmarket",
+        )
+
+        assertFalse(outcome.ok, "add must fail loudly — there is no honest fallback")
+        assertEquals(DshPluginInstaller.Failure.COMMAND_FAILED, outcome.failure)
+        val text = Files.readString(
+            home.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME)
+                .resolve(DshProfileManifest.FILE_NAME),
+            StandardCharsets.UTF_8,
+        )
+        assertEquals(manifest, text, "the manifest must be restored")
+    }
+
+    @Test
     fun `missing runtime fails fast without running anything`() {
         val outcome = DshPluginInstaller.run(
             projectHome = projectHome(manifest),

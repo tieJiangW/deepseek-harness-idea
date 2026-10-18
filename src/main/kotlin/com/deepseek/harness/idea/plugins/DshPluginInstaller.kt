@@ -253,8 +253,26 @@ internal object DshPluginInstaller {
             LOG.info("dsh plugin $action: exec ${cmd.joinToString(" ")}")
             val (code, output) = exec(cmd, profileDir, env, onLine, cancelled)
             if (code != 0) {
+                // 卸载的兜底：运行中的 dsh 会占用 node_modules，pnpm 删不掉（实测稳定 exit=1）。
+                // dsh 只按 manifest 的 `dsh.profile.bundles` 决定加载什么，所以从 manifest 移除声明
+                // 就等于真正卸载；node_modules 残留无害，下次 pnpm 操作会自动对账。
+                if (action == "remove" && !spec.isNullOrEmpty() && code != CANCEL_EXIT && code != TIMEOUT_EXIT) {
+                    val fallback = removeViaManifest(projectHome, profileDir, spec)
+                    if (fallback != null) {
+                        LOG.info("dsh plugin remove fell back to manifest editing for $spec (pnpm exit=$code)")
+                        return outcome(
+                            ok = true,
+                            output = output + "\n" + fallback,
+                            profile = readProfile(projectHome),
+                        )
+                    }
+                }
                 restoreProfile(backup, profileDir)
-                LOG.warn("dsh plugin $action failed (exit=$code) for $profileDir; profile manifest restored")
+                // 失败输出必须进日志：UI 可能被模态挡住（历史事故），日志是唯一的兜底证据。
+                LOG.warn(
+                    "dsh plugin $action failed (exit=$code) for $profileDir; profile manifest restored; output tail:\n" +
+                        output.takeLast(3000),
+                )
                 return outcome(
                     ok = false,
                     output = output,
@@ -371,9 +389,41 @@ internal object DshPluginInstaller {
         return dir
     }
 
+    /**
+     * 卸载兜底：直接从 profile manifest 里移除声明（不改 `node_modules`）。
+     *
+     * @return 成功时的说明文本（供 UI 提示）；失败/无效返回 `null`。
+     */
+    private fun removeViaManifest(projectHome: Path, profileDir: Path, pkg: String): String? {
+        val manifest = profileDir.resolve(DshProfileManifest.FILE_NAME)
+        if (!Files.isRegularFile(manifest)) return null
+        return try {
+            val before = Files.readString(manifest, StandardCharsets.UTF_8)
+            val after = DshPluginManifestEditor.removePackage(before, pkg)
+            if (after == before || DshPluginManifestEditor.stillDeclares(after, pkg)) {
+                LOG.warn("manifest fallback could not remove $pkg from $manifest")
+                return null
+            }
+            // 原子写（先写临时文件再替换），避免 dsh 正在读时看到半截 JSON
+            val tmp = manifest.resolveSibling(manifest.fileName.toString() + ".tmp-${System.nanoTime()}")
+            Files.writeString(tmp, after, StandardCharsets.UTF_8)
+            try {
+                Files.move(tmp, manifest, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            } catch (e: Exception) {
+                Files.move(tmp, manifest, StandardCopyOption.REPLACE_EXISTING)
+            }
+            LOG.info("removed $pkg from the profile manifest (pnpm could not delete the files): $manifest")
+            "note: $pkg was removed from the profile manifest (the harness was holding the files, so pnpm could " +
+                "not delete them). It will no longer be loaded after restarting the harness; leftover files under " +
+                "node_modules are harmless and are reconciled by the next install/remove."
+        } catch (e: Exception) {
+            LOG.warn("manifest fallback failed for $pkg", e)
+            null
+        }
+    }
+
     /** 失败回滚：把备份里的文件写回 profile（`node_modules` 不回滚，未被 manifest 声明即不会加载）。 */
-    private fun restoreProfile(backup: Path, profileDir: Path) {
-        BACKUP_FILES.forEach { name ->
+    private fun restoreProfile(backup: Path, profileDir: Path) {        BACKUP_FILES.forEach { name ->
             val saved = backup.resolve(name)
             if (Files.isRegularFile(saved)) {
                 runCatching { Files.copy(saved, profileDir.resolve(name), StandardCopyOption.REPLACE_EXISTING) }

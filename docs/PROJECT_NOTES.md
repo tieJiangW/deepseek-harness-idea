@@ -146,6 +146,31 @@ src/main/resources/
 | 沙箱 spawn EPERM | npm/子进程 `spawn EPERM` | 沙箱禁管道 stdio；npm 用 `--ignore-scripts`（原生依赖预编译无需 postinstall），Node 子进程用 `stdio:'ignore'`+轮询端口 |
 | Gradle 缓存锁 | 见 §1 | `--no-daemon` + 杀残留 daemon |
 
+**第四轮：装好了、卸载卡 61s（"Checking the runtime…" + 无输出/无心跳）**。这次日志终于决定性：
+```
+16:32:07,547 dsh plugin remove: exec …      ← 命令真的启动了
+16:32:08,639 WARN dsh plugin remove failed (exit=1); profile manifest restored
+```
+**命令 1 秒就结束了、结果也返回了，但界面 60 秒没变。** 根因是 **IDEA 的模态规则**：
+`Application.invokeLater(runnable)` 的默认模态状态是 `ModalityState.defaultModalityState()`，在**后台线程**上
+等于 `NON_MODAL`；而**设置页是模态对话框**，于是所有"后台 → UI"的更新（阶段、输出行、结果、`setBusy(false)`）
+都被**推迟到对话框关闭之后**才执行。只有 EDT 上直接设置的文案与 Swing Timer（ticker）在跑 —— 于是看起来
+"永远在读秒"，而实际命令早已完成。
+- 修复：新增 `postUi(block)`，统一用 `invokeLater(block, ModalityState.any())`；所有后台回调改走它。
+- 教训：**任何"后台线程更新模态对话框里的 UI"都必须显式指定 `ModalityState.any()`**；默认值在后台线程是
+  NON_MODAL，会被模态挡住。日志里"命令已完成"与"界面没动"同时成立时，优先怀疑模态，而不是任务没跑。
+
+**同轮修掉第二个真问题：卸载在 dsh 运行时会稳定失败（exit=1）**。实测复现：干净的临时 profile 里
+`dsh plugin web add/remove dshmarket` 都 `exit=0`；但在**运行中的 dsh 所持有的 profile** 上 remove 必失败 ——
+pnpm 要删除 `node_modules` 里的文件，而 Windows 上文件被进程占用就删不掉（add 只新增，所以只有 remove 中招）。
+- 修复（兜底）：卸载的 pnpm 命令失败时，改为**从 profile manifest 移除声明**（`DshPluginManifestEditor`）。
+  dsh 只按 `dsh.profile.bundles` 决定加载什么，因此"从 manifest 移除" = 真正卸载（重启 Harness 后不再加载）；
+  `node_modules` 残留无害，下次 pnpm 操作按 manifest 自动对账。UI 会显示一条 `note:` 说明这一点。
+- 文本编辑刻意**不用正则**：第一版用正则替换，测试立刻抓到它会误伤 `"a"` 与 `"a-b"` 并把整个 `bundles` 清空；
+  现改为"按顶层逗号切分容器 → 丢掉目标段 → 原样拼回"（保留原始格式与未知字段，如 `packageManager` /
+  `pnpm.overrides`）。新增 `DshPluginManifestEditorTest`（7 例）+ 两个端到端用例
+  （假 dsh 失败 → 兜底成功且 manifest 正确；add 失败 **不**做兜底、manifest 回滚）。
+
 ### v0.2.5 事故：`cleanLegacySharedRoot` 把共享 profile 根当遗留删掉（自伤，已修）
 
 **症状（用户实测）**：点设置页「刷新」后一直停在 "Reading the profile…"，计时一路涨到 35s+；放开后插件列表
@@ -731,11 +756,11 @@ x64 对应 `*-darwin-x64`）。
 
 | 层 | 类 | 说明 |
 |---|---|---|
-| 单元 | PortParserTest(4) / McpPatchGeneratorTest(6) / SnapshotDiffTest(5) / PathFiltersTest(5) / SentSelectionQueueTest(5) / WorkspaceInitializerTest(12) / DshRuntimeRegistryTest(3) / CredentialImporterTest(4) / **JsonCodecTest(v0.1.1,9)** / **ExplainLogComposerTest(v0.1.3-dev,4)** / **LegacySessionMigratorTest(v0.1.3-dev,14)** / **DshCredentialsMaskTest(v0.1.3-dev,10)** / **DshCredentialsSyncTest(v0.1.3-dev,5)** / **PlatformTest(v0.2.0,10)** / **RuntimeAssetsTest(v0.2.0,6)** / **RuntimeProvisionerTest(v0.2.0,7)** / **SharedProfilesLinkTest(v0.2.5,11)** / **DshProfileManifestTest(v0.2.5,14)** / **DshPluginInstallerTest(v0.2.5,13)** / **DshPluginInstallerStreamingTest(v0.2.5,5)** / **SharedConfigCleanupTest(v0.2.5,3)** | 纯 JUnit，无 IDE 依赖 |
+| 单元 | PortParserTest(4) / McpPatchGeneratorTest(6) / SnapshotDiffTest(5) / PathFiltersTest(5) / SentSelectionQueueTest(5) / WorkspaceInitializerTest(12) / DshRuntimeRegistryTest(3) / CredentialImporterTest(4) / **JsonCodecTest(v0.1.1,9)** / **ExplainLogComposerTest(v0.1.3-dev,4)** / **LegacySessionMigratorTest(v0.1.3-dev,14)** / **DshCredentialsMaskTest(v0.1.3-dev,10)** / **DshCredentialsSyncTest(v0.1.3-dev,5)** / **PlatformTest(v0.2.0,10)** / **RuntimeAssetsTest(v0.2.0,6)** / **RuntimeProvisionerTest(v0.2.0,7)** / **SharedProfilesLinkTest(v0.2.5,11)** / **DshProfileManifestTest(v0.2.5,14)** / **DshPluginInstallerTest(v0.2.5,13)** / **DshPluginInstallerStreamingTest(v0.2.5,5)** / **SharedConfigCleanupTest(v0.2.5,3)** / **DshPluginManifestEditorTest(v0.2.5,7)** | 纯 JUnit，无 IDE 依赖 |
 | 集成冒烟 | DshBootstrapSmokeTest(真实 dsh 启动 + workspace 注册断言) / DshMcpBridgeSmokeTest(mock bridge + MCP tools/list 6 工具 + failOnStartupError 严格启动) / WorkspaceInitializerSmokeTest(切换项目工作区顺序) / **LegacySessionMigratorSmokeTest(v0.1.3-dev：zstd session 迁移后 workspace.json 自动挂接)** | 需 `DSH_IDEA_RUNTIME`，否则跳过 |
 
 - 冒烟测试注意：临时 DSH_HOME 内 dsh 自愈 junction 指向 runtime → **tearDown 必须先 unlinkJunctions 再让 `@TempDir` 清理**，否则清空 runtime（见 §4）。
-- 测试计数：**240 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 240 为准**。
+- 测试计数：**249 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 249 为准**。
 
 ---
 

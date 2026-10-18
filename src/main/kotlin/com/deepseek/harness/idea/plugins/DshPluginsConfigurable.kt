@@ -116,7 +116,22 @@ class DshPluginsConfigurable : SearchableConfigurable {
     @Volatile
     private var lastActivityAt: Long = 0L
 
-    /** 每秒刷新"已用 Ns / 最近活动"的 ticker。 */
+    /**
+     * 从**非 EDT 线程**把 UI 更新投递到 EDT。
+     *
+     * **必须显式传 `ModalityState.any()`**：`invokeLater(runnable)` 的默认模态状态是
+     * `ModalityState.defaultModalityState()`，在后台线程即 `NON_MODAL`；而设置页是**模态对话框**，
+     * 于是这些 runnable 会被**推迟到对话框关闭后才执行**。v0.2.5 用户实测的表现正是如此：
+     * 卸载命令 1 秒就结束了（日志 `dsh plugin remove failed (exit=1)` 且 manifest 已回滚），
+     * 但界面一直停在"Checking the runtime… (61s)"——阶段、输出、结果、`setBusy(false)` 全被挡住，
+     * 只有 EDT 上直接设置的文案与 Swing Timer（ticker）在更新，看起来就像"卡死"。
+     */
+    private fun postUi(block: () -> Unit) {
+        ApplicationManager.getApplication().invokeLater(block, com.intellij.openapi.application.ModalityState.any())
+    }
+
+
+    /** 每秒刷新"已用 Ns / 最近活动"的 ticker（EDT）。 */
     private var ticker: Timer? = null
 
     /** 刷新超时后的"仍在读取"兜底文案（一次性）。 */
@@ -435,7 +450,7 @@ class DshPluginsConfigurable : SearchableConfigurable {
      * 首次启用共享、链接缺失等）时才转后台，并且带锁超时，失败可重试。
      */
     private fun refreshAsync() {
-        ApplicationManager.getApplication().invokeLater {
+        postUi {
             val seq = refreshSeq.incrementAndGet()
             val startedAt = System.currentTimeMillis()
             val home = homeManager().homeDir(selectedProjectPath)
@@ -464,7 +479,7 @@ class DshPluginsConfigurable : SearchableConfigurable {
                     }
                 }.apply { isRepeats = false; start() }
                 repairProfileAsync(seq)
-                return@invokeLater
+                return@postUi
             }
 
             setBusy(false)
@@ -478,14 +493,14 @@ class DshPluginsConfigurable : SearchableConfigurable {
             val startedAt = System.currentTimeMillis()
             val home = runCatching { homeManager().ensureProfileHome(selectedProjectPath) }.getOrNull()
             LOG.info("repair($selectedProjectPath): ${System.currentTimeMillis() - startedAt}ms ready=${home != null}")
-            ApplicationManager.getApplication().invokeLater {
-                if (refreshSeq.get() != seq) return@invokeLater
+            postUi {
+                if (refreshSeq.get() != seq) return@postUi
                 slowHintTimer?.stop()
                 slowHintTimer = null
                 setBusy(false)
                 if (home == null) {
                     setStatus(DshBundle.message("plugins.error.repairFailed"), errorColor())
-                    return@invokeLater
+                    return@postUi
                 }
                 refreshAsync() // 重读（此时一定能读到 manifest）
             }
@@ -515,7 +530,7 @@ class DshPluginsConfigurable : SearchableConfigurable {
         }.onFailure { e ->
             // 提交失败也要让界面有结论，绝不停在"进行中"
             LOG.warn("$tag: could not submit to the worker", e)
-            ApplicationManager.getApplication().invokeLater {
+            postUi {
                 setBusy(false)
                 setStatus(DshBundle.message("plugins.error.generic", e.toString()), errorColor())
             }
@@ -603,7 +618,7 @@ class DshPluginsConfigurable : SearchableConfigurable {
         setPhase(DshBundle.message("plugins.phase.checking"))
 
         onWorker("install:$action:$spec") {
-            fun post(block: () -> Unit) = ApplicationManager.getApplication().invokeLater(block)
+            fun post(block: () -> Unit) = postUi(block)
             val outcome = runCatching {
                 // 只确保 profile 目录/链接就绪（轻量）；重量级初始化留给 dsh 启动时的 ensureHome。
                 // null = 锁超时（另一条路径正忙），此时**不能**继续：否则 installer 会 `createDirectories`
