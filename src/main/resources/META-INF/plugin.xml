@@ -29,6 +29,11 @@
             <li><b>dsh plugins, installed once</b> — install a dsh plugin package from the <i>DSH Plugins</i>
             settings page and every project loads it (the profile is shared; project data is not). No global pnpm
             needed — the plugin provisions its own.</li>
+            <li><b>Visible installs, one-click restart</b> — installing shows the phase, a live elapsed timer, streamed
+            pnpm output, a "still running" hint and a Cancel button, then a green ✓ / red ✗ result with an IDE
+            notification; a successful change offers <i>Restart harness now</i> so the plugin takes effect immediately.
+            Uninstall falls back to a manifest edit when the running harness holds the files, and a mismatched
+            <code>node_modules</code> is aligned or rebuilt automatically.</li>
             <li><b>IDE context via MCP</b> — the agent can read your current editor selection, open
             files and project tree, and open/reveal files, through the <code>mcp__ide__*</code> tools.</li>
             <li><b>Send selection to DSH</b> — right-click any code selection to send a compact file
@@ -36,8 +41,10 @@
             the agent even if injection fails (clipboard fallback).</li>
             <li><b>Review &amp; restore</b> — a baseline snapshot lets you diff agent changes
             (modified/new/deleted), restore single or all files, ignore, or rebaseline.</li>
-            <li><b>Self-contained runtime</b> — Node.js and the DeepSeek Harness runtime are bundled
-            with the plugin and extracted on first use; no separate installation or network needed.</li>
+            <li><b>Self-provisioned runtime (thin build)</b> — the plugin itself is ~2 MB. The per-platform runtime
+            (Node.js 22 + DeepSeek Harness) downloads once on first use, is SHA-256 verified and then reused offline;
+            a local runtime directory, a local zip import or a fat build (<code>-Pthin=false</code>) cover
+            air-gapped setups.</li>
             <li><b>Multi-project &amp; lifecycle</b> — one instance per project (max 3 concurrent),
             processes are terminated on project close / IDE exit; crash auto-restart with backoff.</li>
             <li><b>Logs &amp; diagnostics</b> — a DSH Log tab shows the dsh process output; crash
@@ -56,6 +63,8 @@
             <li>Start a conversation; ask the agent to read your code, or select code and use
             <i>Send Selection to DSH</i> to hand it context.</li>
             <li>Use <i>Review changes</i> in the tool window to inspect and restore agent edits.</li>
+            <li>Need more capabilities? Open <b>Settings → Tools → DeepSeek Harness → DSH Plugins</b>, install a dsh
+            plugin package and press <i>Restart harness now</i> — the new plugin is available in every project.</li>
         </ol>
 
         <h4>Runtime &amp; offline</h4>
@@ -82,6 +91,9 @@
             配置一次即对所有项目生效；而会话、工作区与附件仍按项目隔离。</li>
             <li><b>dsh 插件装一次即共享</b> — 在「DSH 插件」设置页安装 dsh 插件包，所有项目都会加载（profile 共享，
             项目数据不共享）。无需用户全局安装 pnpm —— 插件会自备一份。</li>
+            <li><b>安装可见 · 一键重启</b> — 安装时显示阶段、每秒用时、实时 pnpm 输出、"仍在运行"提示与「取消」，
+            结束给出绿色 ✓ / 红色 ✗ 并弹 IDE 通知；成功后可直接点「立即重启 Harness」使插件马上生效。
+            卸载遇到文件被运行中的 Harness 占用时降级为 manifest 级移除；`node_modules` 与 pnpm 配置不一致会自动对齐或重建。</li>
             <li><b>MCP 桥接 IDE 上下文</b> — 智能体可通过 <code>mcp__ide__*</code> 工具读取当前
             选中代码、打开的文件、项目树，并打开/定位文件。</li>
             <li><b>发送选中代码到 DSH</b> — 右键选中代码即可发送紧凑文件引用
@@ -89,8 +101,9 @@
             （剪贴板兜底）。</li>
             <li><b>审查与还原</b> — 基线快照让您可以 diff 智能体的改动（修改/新增/删除），
             还原单个或全部文件、忽略、或重新基线。</li>
-            <li><b>自包含运行时</b> — Node.js 与 DeepSeek Harness 运行时随插件打包，首次使用自动
-            解压；无需单独安装或联网。</li>
+            <li><b>运行时按需下发（瘦身版）</b> — 插件本体约 2MB；Node.js 22 与 DeepSeek Harness 运行时首次使用时
+            按平台下载、SHA-256 校验，之后离线复用；也可用「运行时目录」/ 本地 zip 导入 / fat 包
+            （<code>-Pthin=false</code>）满足内网与离线场景。</li>
             <li><b>多项目与生命周期</b> — 每项目一个实例（并发上限 3）；项目关闭 / IDE 退出时
             自动终止进程；崩溃自动退避重启。</li>
             <li><b>日志与诊断</b> — DSH Log 标签页显示 dsh 进程输出；崩溃通知与可配置日志级别
@@ -108,6 +121,8 @@
             <li>开始对话；让智能体阅读你的代码，或选中代码后使用 <i>发送选中代码到 DSH</i>
             把上下文交给它。</li>
             <li>在工具窗口使用 <i>审查改动</i> 查看并还原智能体的修改。</li>
+            <li>需要更多能力时，进入 <b>设置 → Tools → DeepSeek Harness → DSH 插件</b> 安装 dsh 插件包，点
+            <i>立即重启 Harness</i> —— 新插件立刻在所有项目中可用。</li>
         </ol>
 
         <h4>运行时与离线</h4>

@@ -2,41 +2,37 @@
 
 本仓库开发一个 IntelliJ IDEA 插件（类 Qoder）：在 IDE 内嵌入 DeepSeek Harness（DSH）Web UI，让智能体能读写当前项目文件、通过 MCP 调用 IDE 能力，并提供代码上下文发送与 diff 审查/还原等原生集成。
 
-## 当前状态摘要（v0.2.4，2026-09-18）
+## 当前状态摘要（v0.2.5）
 
 > **交接先看这一节**；实测细节见 [PROJECT_NOTES.md](./PROJECT_NOTES.md)，运行时细节见 [release-runtime.md](./release-runtime.md)，
-> 发布操作见 [RELEASE_PROCESS.md](./RELEASE_PROCESS.md)。
+> 发布操作见 [RELEASE_PROCESS.md](./RELEASE_PROCESS.md)，上架文案见 [marketplace-listing.md](./marketplace-listing.md)。
 
-- **版本与产物**：插件 `0.2.4`（thin 默认）→ `build/distributions/deepseek-harness-idea-0.2.4.zip`
+- **版本与产物**：插件 `0.2.5`（thin 默认，约 2MB）→ `build/distributions/deepseek-harness-idea-0.2.5.zip`
 - **内置运行时**：`@deepseek-ai/dsh@0.1.5-rc.2` + Node.js 22.23.2（唯一版本来源 `DshHomeManager.DSH_VERSION`）
 - **IDE 兼容**：`since-build=241` / `until-build=262.*`；已在 **2024.1.7（默认，含全部测试）/ 2024.3.2 / 2026.2**
   分别通过 `compileKotlin` + `compileTestKotlin`
-- **测试**：全部通过（194 项，含 4 个真实 dsh 冒烟：启动与端口 / workspace 注册与置顶 / MCP 工具链 / session 迁移）
-- **v0.2.4 主题：dsh 配置共享化（修复"新模型/API Key/预设重启后消失"）**——
-  ① 删除 `copyGlobalConfigTo`（启动时用共享副本**覆盖**项目配置，是配置丢失的根因）；
-  ② 修正 `ide.yml` 的 patch 语法为 `- id: settings` / `- id: credentials` / `- id: agent-presets` /
-  `- id: skill-filesystem`（旧的 `$settings` 形式被 dsh 以 `patch: id is required for non-insert patches` 拒绝，
-  全局化从未生效）；③ 共享面覆盖设置文档、凭据、Agent 预设、个人技能；数据面（会话/工作区/附件）仍按项目隔离；
-  ④ MCP 脚本改为全局唯一一份、部署在 dsh 树内，**删除每项目 `node_modules` junction**；
-  ⑤ 一次性配置迁移（按 namespace / refs+records 文本合并 + 备份到 `<共享根>/migrated/`）
-- **v0.2.4 同时修复：右键"发送选中代码到 DSH" / "DSH 一键解释"没反应**——dsh 0.1.5 的 composer 是
-  **Lexical `contenteditable`**（旧代码找 `<textarea>` 命中 0）；且写入当拍回读会**误判**（文本在
-  `[data-lexical-text="true"]` 节点下）。新增 `ComposerScripts` 统一注入：四级选择器回退、
-  `execCommand('insertText')` 写入、`[data-lexical-text]` + 轮询回读、带 `keyCode/which` 的 Enter 自动提交，
-  结果语义 `injected/submitted/blocked/notfound/failed`（仅后两者降级剪贴板+通知）。**已在真实 dsh 0.1.5 页面
-  用 headless Chromium + CDP 实测通过**（insertText 生效、回读命中、Enter 501ms 内提交）
+- **测试**：全部通过（**260 项**，含 4 个真实 dsh 冒烟：启动与端口 / workspace 注册与置顶 / MCP 工具链 / session 迁移）
+- **v0.2.5 主题：dsh 插件包"装一次、多项目生效"** ——
+  ① 每项目的 `<DSH_HOME>/profiles` 链接到共享 profile 根（Windows junction / 其它平台符号链接），
+  插件共享而数据面（会话/工作区/附件）仍按项目隔离；② 新增「DSH 插件」设置页 + 工具窗入口：
+  列出已装插件与纯依赖、按包名/版本范围或本地目录安装/卸载，自备私有 pnpm（首次联网）；
+  ③ 安装过程可见（阶段 + 进度条 + 每秒用时 + 实时输出 + 静默提示 + 可取消 + 绿✓/红✗ + IDE 通知）；
+  ④ 装完**一键重启**即生效；⑤ 健壮兜底：manifest 备份/回滚、卸载遇文件占用降级为 manifest 级移除、
+  `node_modules` 与 pnpm 配置不一致时自动对齐或隔离重建
+- **v0.2.5 同时修复的三个问题**：① 遗留清理误删共享 profile 根（清空已装插件列表 + 刷新卡死）；
+  ② 后台 → UI 更新被**模态设置对话框**挡住（命令 1 秒结束却像卡 60 秒）；③ 安装/修复依赖 IDE 公共线程池
+  （重启后索引占满 → 任务排队且无日志）
+- **v0.2.4 主题（已完成）**：dsh 配置共享化（修复"新模型/API Key/预设重启后消失"）+ Lexical composer 注入修复
+  （右键发送选中代码 / DSH 一键解释已恢复，真实页面 CDP 实测通过）
 - **平台**：Windows x64、macOS（arm64 / x64）、Linux（x64 / arm64）五平台运行时资产
-- **发布状态（v0.2.4，2026-09-18）**：GitHub Release
-  [`v0.2.4`](https://github.com/tieJiangW/deepseek-harness-idea/releases/tag/v0.2.4)（id 391244240，**11 个资产**：
-  插件 zip + 5 平台运行时及 `.sha256`）；JetBrains Marketplace update **1174317**（`approve=false` 待审）
-- **macOS 验证**：插件已在 **macOS（Apple Silicon）** 由用户完成端到端实测（安装、启动、对话、MCP 工具链）
-- **⚠️ 已知限制（优先级最高）**：dsh 0.1.5 将 composer 由 `<textarea>` 改为 **Lexical contenteditable**，
-  因此「发送选中代码」与「DSH 一键解释」目前**降级为剪贴板**（有通知）。适配需改写 JS 注入并**在真实 JCEF 页面验证**。
-- **⚠️ 本机环境注意**：`github.com:443` 不通（`api.github.com`、`uploads.github.com`、`plugins.jetbrains.com` 可达）；
-  `tooling/runtime-dev` 必须与 `DshHomeManager.DSH_VERSION` 一致（v0.2.4 起已对齐 0.1.5-rc.2，旧 0.1.1 树保存在
-  `tooling/runtime-dev/dsh-0.1.1-backup`），否则冒烟测试会以旧契约（点号 RPC、无 token）失败。
-- **下一步候选**：① composer 注入适配（Lexical）；② 会话/附件磁盘清理入口（`attachments` 无限累积）；
-  ③ `ide_reveal_file` 项目树定位；④ 远程开发/Gateway 检测提示；⑤ `org.jetbrains.intellij` 1.17.4 → 2.x
+- **发布状态**：v0.2.4 已发布（GitHub Release id 391244240，11 资产；Marketplace update 1174317 待审）；
+  **v0.2.5 待发布**（`scripts/release-v0.2.5.mjs`，凭据只从环境变量读）
+- **macOS 验证**：v0.2.4 已在 **macOS（Apple Silicon）** 由用户完成端到端实测（安装、启动、对话、MCP 工具链）
+- **⚠️ 本机环境注意**：`github.com:443` 不稳定（`api.github.com`、`uploads.github.com`、`plugins.jetbrains.com` 可达）；
+  `tooling/runtime-dev` 必须与 `DshHomeManager.DSH_VERSION` 一致（已对齐 0.1.5-rc.2，旧 0.1.1 树保存在
+  `tooling/runtime-dev/dsh-0.1.1-backup`），否则冒烟测试会以旧契约（点号 RPC、无 token）失败
+- **下一步候选**：① 会话/附件磁盘清理入口（`attachments` 无限累积）；② `ide_reveal_file` 项目树定位；
+  ③ 远程开发/Gateway 检测提示；④ `org.jetbrains.intellij` 1.17.4 → 2.x；⑤ 插件市场截图补「DSH 插件」页
 
 ## 文档索引
 
@@ -44,11 +40,13 @@
 |---|---|---|
 | [PRD.md](./PRD.md) | 规划需求文档：目标、用户故事、功能/非功能需求、验收标准、风险 | 草稿（随实现迭代更新） |
 | [DESIGN.md](./DESIGN.md) | 详设文档：架构、模块设计、接口契约、数据流、测试策略 | 草稿（随实现迭代更新） |
-| [ACCEPTANCE.md](./ACCEPTANCE.md) | PRD §7 验收清单走查（Step 5 执行，自动化 vs 手工项） | 维护中（v0.2.4：194 项测试全部通过；手工项待真实 IDE 会话） |
+| [ACCEPTANCE.md](./ACCEPTANCE.md) | PRD §7 验收清单走查（Step 5 执行，自动化 vs 手工项） | 维护中（v0.2.5：260 项测试全部通过；手工项待真实 IDE 会话） |
 | [MILESTONE_REVIEW.md](./MILESTONE_REVIEW.md) | 里程碑评审（Step 6）：Step 0–5 总结、需求覆盖矩阵、遗留问题、风险回顾、后续规划 | 历史快照（2026-08-20 时点；**遗留问题 A–D 清单仍在使用**，最新状态见本文件「当前状态摘要」） |
-| [PROJECT_NOTES.md](./PROJECT_NOTES.md) | 项目知识库：本机构建环境、dsh 行为实测、踩坑记录、2024.1 API 勘误、后续任务参考 | 维护中（v0.2.4，194 项测试全部通过） |
+| [PROJECT_NOTES.md](./PROJECT_NOTES.md) | 项目知识库：本机构建环境、dsh 行为实测、踩坑记录、2024.1 API 勘误、后续任务参考 | 维护中（v0.2.5，260 项测试全部通过） |
 | [release-runtime.md](./release-runtime.md) | 运行时发布与资产契约：平台矩阵、原生构建/交叉构建、下载与解压、离线场景 | 维护中（v0.2.3：五平台资产已发布） |
-| [RELEASE_PROCESS.md](./RELEASE_PROCESS.md) | 发布流程参考（GitHub Release + JetBrains Marketplace）：凭据、步骤、接口、编码陷阱、API 备用通道 | 维护中（v0.2.3 实操验证） |
+| [RELEASE_PROCESS.md](./RELEASE_PROCESS.md) | 发布流程参考（GitHub Release + JetBrains Marketplace）：凭据、步骤、接口、编码陷阱、API 备用通道 | 维护中（v0.2.3 / v0.2.4 实操验证；v0.2.5 用 release-v0.2.5.mjs） |
+| [marketplace-listing.md](./marketplace-listing.md) | Marketplace 上架填写：短描述、分类标签、数据收集声明、截图建议（当前 v0.2.5） | 维护中 |
+| [releases/](./releases/) | 各版本发布说明（中英双语，GitHub Release 正文即取自 v0.2.5.md） | 维护中 |
 
 ## 文档约定
 
