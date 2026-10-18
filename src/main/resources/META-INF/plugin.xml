@@ -140,6 +140,13 @@
             the current phase (checking the runtime → preparing pnpm → installing), streamed pnpm output, a
             "still running" hint when the child is silent, a Cancel button, and an explicit green ✓ / red ✗ result
             (with the time taken) plus an IDE notification — so you always know whether it worked.</li>
+            <li><b>Fixes for this release.</b> A v0.2.5 development build could wipe the installed plugin list: the
+            legacy-cleanup step (run on every start and on Refresh) still deleted
+            <code>&lt;shared home&gt;/profiles</code>, which since v0.2.5 <em>is</em> the shared profile — a Refresh then
+            looked like it hung for tens of seconds and the plugin list went empty. That directory is no longer cleaned
+            and a regression test guards it. Refresh also stopped running the full startup initialisation (it only needs
+            the profile), the "no output" hint only appears while a child process is really running, and the one-off
+            shared-config migration no longer re-runs on every plugin upgrade.</li>
             <li><b>插件装一次，所有项目生效。</b>每个项目的 <code>profiles/</code> 目录现在链接到统一的共享 profile 根，
             因此在一个项目中安装的插件对所有项目可见；会话、工作区与附件仍留在各自 DSH_HOME，隔离不变。可在
             <i>设置 → Tools → DeepSeek Harness</i> 中用「跨项目共享 dsh 插件包」开关控制（默认开启）；既有的项目级
@@ -153,6 +160,10 @@
             <li><b>安装过程看得见。</b>不定进度条 + 每秒刷新的用时 + 当前阶段（检查运行时 → 准备 pnpm → 正在安装）+
             实时 pnpm 输出 + 长时间无输出时"仍在运行"提示 + 「取消」按钮，结束给出绿色 ✓ / 红色 ✗（含用时）并弹
             IDE 通知 —— 不再无从判断是否装成功。</li>
+            <li><b>本版修复。</b>v0.2.5 的开发中构建可能清空已装插件列表：遗留清理（每次启动与「刷新」都会跑）仍会删除
+            <code>&lt;共享根&gt;/profiles</code>，而从 v0.2.5 起它就是共享 profile —— 表现为刷新像卡住几十秒、
+            插件列表变空。现已不再清理该目录，并加了回归测试守护。同时：刷新不再跑完整的启动初始化（它只需要 profile）、
+            "无输出"提示只在真的有子进程时出现、一次性共享配置迁移不再随插件升级重跑。</li>
         </ul>
         <h4>v0.2.4</h4>
         <ul>

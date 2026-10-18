@@ -464,9 +464,18 @@ object SharedConfigMigrator {
         )
     }
 
-    /** 共享根残留清理（幂等）：清掉 v0.1.2 时代遗留的 profile / MCP 脚本 / junction。 */
+    /**
+     * 共享根残留清理（幂等）：清掉 v0.1.2 时代遗留的 MCP 脚本 / junction。
+     *
+     * ⚠️ **绝对不能清理 `<共享根>/profiles`**：v0.2.5 起它是共享 dsh profile 的**唯一真源**
+     * （`dsh plugin --profile web add` 装的包全在里面，含 `profiles/node_modules` 与
+     * `profiles/web/node_modules`）。v0.2.5 曾把它当成 v0.1.2 残留加进本列表，后果是：
+     * `ensureHome` 每次启动/刷新都**递归删除**共享 profile（上万个文件，Windows 上耗时数十秒
+     * → 设置页「刷新」看起来永久卡住），已安装的插件凭空消失，`dsh plugin add` 偶发 exit=1。
+     * 教训见 docs/PROJECT_NOTES.md「v0.2.5 cleanLegacySharedRoot 自伤」：往这里加条目之前，
+     * 先确认它不是**当前版本由插件管理**的目录/文件。
+     */
     fun cleanLegacySharedRoot(sharedRoot: Path) {
-        cleanup(sharedRoot.resolve("profiles"))
         cleanup(sharedRoot.resolve("node_modules"))
         cleanup(sharedRoot.resolve("mcp-ide-server.mjs"))
         cleanup(sharedRoot.resolve("ide.yml"))

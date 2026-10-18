@@ -92,6 +92,12 @@ class DshPluginsConfigurable : SearchableConfigurable {
     /** 每秒刷新"已用 Ns / 最近活动"的 ticker。 */
     private var ticker: Timer? = null
 
+    /** 刷新超时后的"仍在读取"兜底文案（一次性）。 */
+    private var slowHintTimer: Timer? = null
+
+    /** 刷新序号：丢弃被更新一次刷新取代的旧结果/旧兜底文案。 */
+    private val refreshSeq = java.util.concurrent.atomic.AtomicLong(0)
+
     /** 输出区缓冲（行列表；超过上限截断最旧的，避免 pnpm 刷屏把内存吃满）。 */
     private val outputLines = ArrayList<String>(256)
 
@@ -279,15 +285,16 @@ class DshPluginsConfigurable : SearchableConfigurable {
     private fun secondsSince(now: Long, from: Long): Long = ((now - from) / 1000).coerceAtLeast(0)
 
     /** 每秒刷新忙碌状态：阶段 + 已用时长（+ 长时间无输出时提示仍在等待）。 */
-    private fun startTicker() {
+    private fun startTicker(showSilenceHint: Boolean) {
         stopTicker()
         ticker = Timer(1000) {
             if (!operationRunning) return@Timer
             val now = System.currentTimeMillis()
             val elapsed = secondsSince(now, startedAt)
-            val idle = secondsSince(now, lastActivityAt)
-            val text = if (idle >= 6) {
-                DshBundle.message("plugins.status.runningIdle", phaseText, elapsed, idle)
+            // 只有**真的在跑子进程**（安装/卸载）时，"长时间无输出"才是有意义的提示；
+            // 读取 profile 没有子进程，显示"pnpm 可能静默…可取消"只会误导（v0.2.5 用户实测）。
+            val text = if (showSilenceHint && secondsSince(now, lastActivityAt) >= 6) {
+                DshBundle.message("plugins.status.runningIdle", phaseText, elapsed, secondsSince(now, lastActivityAt))
             } else {
                 DshBundle.message("plugins.status.running", phaseText, elapsed)
             }
@@ -318,9 +325,11 @@ class DshPluginsConfigurable : SearchableConfigurable {
             lastActivityAt = startedAt
             cancelRequested.set(false)
             setStatus(DshBundle.message("plugins.status.running", phase, 0), neutralColor())
-            startTicker()
+            startTicker(showSilenceHint = cancellable)
         } else {
             stopTicker()
+            slowHintTimer?.stop()
+            slowHintTimer = null
             cancelRequested.set(false)
         }
     }
@@ -383,12 +392,22 @@ class DshPluginsConfigurable : SearchableConfigurable {
 
     private fun homeManager(): DshHomeManager = DshHomeManager.getInstance()
 
-    /** 后台刷新：确保 DSH_HOME 骨架（含共享链接）后再读 manifest。 */
+    /** 后台刷新：确保 profile 目录就绪（**轻量路径**，见 [DshHomeManager.ensureProfileHome]）后读 manifest。 */
     private fun refreshAsync() {
+        val seq = refreshSeq.incrementAndGet()
         setBusy(true, DshBundle.message("plugins.phase.preparing"))
+        // 兜底：万一这一步仍然慢（首次迁移/磁盘抖动），5 秒后换成"仍在读取"的**中性**文案。
+        // 旧版这里会显示"pnpm 可能静默…可取消"，但读取 profile 既没有子进程也没有取消按钮 —— 纯误导。
+        slowHintTimer?.stop()
+        slowHintTimer = Timer(5000) {
+            if (operationRunning && refreshSeq.get() == seq) {
+                setStatus(DshBundle.message("plugins.phase.preparingSlow"), neutralColor())
+            }
+        }.apply { isRepeats = false; start() }
+
         ApplicationManager.getApplication().executeOnPooledThread {
             val result = runCatching {
-                val home = homeManager().ensureHome(selectedProjectPath)
+                val home = homeManager().ensureProfileHome(selectedProjectPath)
                 val state = homeManager().profilesState(selectedProjectPath)
                 val profile = DshProfileManifest.parse(
                     runCatching {
@@ -402,18 +421,19 @@ class DshPluginsConfigurable : SearchableConfigurable {
                 Triple(home, state, profile)
             }
             ApplicationManager.getApplication().invokeLater {
+                if (refreshSeq.get() != seq) return@invokeLater // 已有更新的一次刷新，丢弃本次结果
+                slowHintTimer?.stop()
+                slowHintTimer = null
                 setBusy(false)
                 result.onSuccess { (home, state, profile) ->
                     val dir = home.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME)
                     profilePathLabel?.text = DshBundle.message("plugins.profilePath", dir.toString())
                     shareLabel?.text = shareText(state)
                     tableModel?.setEntries(profile.entries())
-                    if (!operationRunning) {
-                        setStatus(
-                            DshBundle.message("plugins.status.loaded", profile.plugins.size, profile.dependencies.size),
-                            neutralColor(),
-                        )
-                    }
+                    setStatus(
+                        DshBundle.message("plugins.status.loaded", profile.plugins.size, profile.dependencies.size),
+                        neutralColor(),
+                    )
                 }.onFailure { e ->
                     setStatus(DshBundle.message("plugins.error.generic", e.message ?: e.toString()), errorColor())
                 }
@@ -485,7 +505,8 @@ class DshPluginsConfigurable : SearchableConfigurable {
         ApplicationManager.getApplication().executeOnPooledThread {
             fun post(block: () -> Unit) = ApplicationManager.getApplication().invokeLater(block)
             val outcome = runCatching {
-                val home = homeManager().ensureHome(selectedProjectPath)
+                // 只确保 profile 目录/链接就绪（轻量）；重量级初始化留给 dsh 启动时的 ensureHome
+                val home = homeManager().ensureProfileHome(selectedProjectPath)
                 DshPluginInstaller.run(
                     projectHome = home,
                     sharedRoot = homeManager().sharedConfigRoot(),

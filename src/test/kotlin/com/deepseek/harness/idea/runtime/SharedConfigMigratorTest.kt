@@ -308,7 +308,7 @@ class SharedConfigMigratorTest {
     }
 
     @Test
-    fun `cleanLegacySharedRoot removes stale per-project style entries but keeps sessions`() {
+    fun `cleanLegacySharedRoot removes stale entries but keeps sessions and the shared profile`() {
         val shared = Files.createDirectories(tmp.resolve("dsh-home"))
         write(shared.resolve("ide.yml"), "[]\n")
         write(shared.resolve("mcp-ide-server.mjs"), "// legacy\n")
@@ -320,7 +320,9 @@ class SharedConfigMigratorTest {
 
         assertFalse(Files.exists(shared.resolve("ide.yml")))
         assertFalse(Files.exists(shared.resolve("mcp-ide-server.mjs")))
-        assertFalse(Files.exists(shared.resolve("profiles")))
+        // v0.2.5：`profiles` 是共享 dsh profile 的真源（插件包装在里面），绝不能被当成遗留清理。
+        // 这里曾断言"profiles 被删除"，正是 v0.2.5 事故（已装插件凭空消失）的测试背书。
+        assertTrue(Files.exists(shared.resolve("profiles/web/package.json")), "the shared profile root is the plugin source of truth")
         assertTrue(Files.exists(shared.resolve("sessions/--proj--/x/header.json")), "sessions are still read by LegacySessionMigrator")
         assertTrue(Files.exists(shared.resolve("settings.yaml")), "the shared config document must never be cleaned")
     }

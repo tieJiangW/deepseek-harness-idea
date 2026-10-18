@@ -146,6 +146,42 @@ src/main/resources/
 | 沙箱 spawn EPERM | npm/子进程 `spawn EPERM` | 沙箱禁管道 stdio；npm 用 `--ignore-scripts`（原生依赖预编译无需 postinstall），Node 子进程用 `stdio:'ignore'`+轮询端口 |
 | Gradle 缓存锁 | 见 §1 | `--no-daemon` + 杀残留 daemon |
 
+### v0.2.5 事故：`cleanLegacySharedRoot` 把共享 profile 根当遗留删掉（自伤，已修）
+
+**症状（用户实测）**：点设置页「刷新」后一直停在 "Reading the profile…"，计时一路涨到 35s+；放开后插件列表
+变成 "No plugins installed yet"（**刚装好的 `dshmarket` 消失**）；日志里 `dsh plugin add` 曾出现一次 `exit=1`。
+
+**根因**：`SharedConfigMigrator.cleanLegacySharedRoot` 的清理列表里含 `<共享根>/profiles` —— 那是 **v0.1.2**
+时代"共享根即全局 DSH_HOME"的遗留目录。但 v0.2.5 起 `<共享根>/profiles` 变成了**共享 dsh profile 的唯一真源**
+（`dsh plugin --profile web add` 装的包全在 `profiles/web/node_modules`，dsh 自愈的 fallback 在
+`profiles/node_modules`）。而 `cleanLegacySharedRoot` 由 **`ensureHome` 每次启动/刷新都调用** ⇒ 每跑一次就
+**递归删除**共享 profile：
+
+- 删除 `profiles/node_modules`（240+ 包、上万个文件）在 Windows 上要几十秒 → 表现就是"刷新卡住"；
+- 删完后 `profiles/web/package.json` 被 `writeIfAbsent` 重新播成**基础模板**，用户装的插件消失；
+- 若同时在跑 `dsh plugin add`（pnpm 正在写入）→ 删除与写入拉锯，pnpm `exit=1`。
+
+**为什么没被测试挡住**：v0.2.4 的 `SharedConfigMigratorTest` 里有一条断言正是
+`assertFalse(Files.exists(shared.resolve("profiles")))` —— 它在 v0.2.4 语义下是对的，v0.2.5 改了语义后
+它变成"为 bug 背书"。已改为断言 profiles **必须保留**。
+
+**修复**：清理列表移除 `profiles`，并加一条铁律注释：往这个列表加条目前先确认它不是**当前版本由插件管理**的
+路径。新增 `SharedConfigCleanupTest`（3 例）锁死：共享 profile / 已装插件包 / `profiles/node_modules` 必须存活，
+`settings.yaml` / `.credentials.yaml` / `sessions` / `migrated` 不得删除，顶层 `node_modules` / `mcp-ide-server.mjs`
+/ `ide.yml` 仍清理。
+
+**连带改进**：
+1. **设置页刷新不再调用 `ensureHome`**（那是"启动 dsh 前的一次性初始化"：配置迁移 + MCP 脚本部署 + legacy
+   session 迁移 + 遗留清理）。新增轻量 `DshHomeManager.ensureProfileHome`：只建/修 `profiles` 链接 + 建
+   `profiles/web` 骨架 + 补 seed 文件，毫秒级；重量级步骤仍由 dsh 启动时的 `ensureHome` 完成。
+2. **状态文案分场景**：只有真的在跑子进程（安装/卸载）时才显示"已 N 秒无输出，pnpm 可能静默…可取消"；
+   读取 profile 时改中性文案（首次迁移可能稍慢），避免让用户去点一个根本不存在的取消。
+3. **`.plugin-layout-version` 改用布局常量** `SHARED_CONFIG_LAYOUT_VERSION="layout-1"`，不再写插件版本 ——
+   否则每次插件升级都会重跑一次共享配置迁移（实测日志 `marker=0.2.4, current=0.2.5; re-running`）。
+4. `ensureHome` 增加分段耗时日志（`config=…ms profiles=…ms total=…ms`），下次这类问题可直接从日志定位；
+   顺便证实**迁移 187MB / 25388 文件的 profiles 实测只要 ~100ms**（同卷 rename），不是瓶颈。
+5. `ensureProfileHome` / `ensureHome` 共用一把可重入锁：并发刷新/安装时避免两个 `mklink` 抢同一链接。
+
 ### v0.2.5 dsh 插件包共享（"装一次、多项目生效"：全链路冒烟实测）
 
 **问题**：dsh 从 `$DSH_HOME/profiles/<name>` 解析 profile（`dsh-app-boot.resolveProfileDir(name, home)` =
@@ -655,11 +691,11 @@ x64 对应 `*-darwin-x64`）。
 
 | 层 | 类 | 说明 |
 |---|---|---|
-| 单元 | PortParserTest(4) / McpPatchGeneratorTest(6) / SnapshotDiffTest(5) / PathFiltersTest(5) / SentSelectionQueueTest(5) / WorkspaceInitializerTest(12) / DshRuntimeRegistryTest(3) / CredentialImporterTest(4) / **JsonCodecTest(v0.1.1,9)** / **ExplainLogComposerTest(v0.1.3-dev,4)** / **LegacySessionMigratorTest(v0.1.3-dev,14)** / **DshCredentialsMaskTest(v0.1.3-dev,10)** / **DshCredentialsSyncTest(v0.1.3-dev,5)** / **PlatformTest(v0.2.0,10)** / **RuntimeAssetsTest(v0.2.0,6)** / **RuntimeProvisionerTest(v0.2.0,7)** / **SharedProfilesLinkTest(v0.2.5,11)** / **DshProfileManifestTest(v0.2.5,14)** / **DshPluginInstallerTest(v0.2.5,13)** / **DshPluginInstallerStreamingTest(v0.2.5,5)** | 纯 JUnit，无 IDE 依赖 |
+| 单元 | PortParserTest(4) / McpPatchGeneratorTest(6) / SnapshotDiffTest(5) / PathFiltersTest(5) / SentSelectionQueueTest(5) / WorkspaceInitializerTest(12) / DshRuntimeRegistryTest(3) / CredentialImporterTest(4) / **JsonCodecTest(v0.1.1,9)** / **ExplainLogComposerTest(v0.1.3-dev,4)** / **LegacySessionMigratorTest(v0.1.3-dev,14)** / **DshCredentialsMaskTest(v0.1.3-dev,10)** / **DshCredentialsSyncTest(v0.1.3-dev,5)** / **PlatformTest(v0.2.0,10)** / **RuntimeAssetsTest(v0.2.0,6)** / **RuntimeProvisionerTest(v0.2.0,7)** / **SharedProfilesLinkTest(v0.2.5,11)** / **DshProfileManifestTest(v0.2.5,14)** / **DshPluginInstallerTest(v0.2.5,13)** / **DshPluginInstallerStreamingTest(v0.2.5,5)** / **SharedConfigCleanupTest(v0.2.5,3)** | 纯 JUnit，无 IDE 依赖 |
 | 集成冒烟 | DshBootstrapSmokeTest(真实 dsh 启动 + workspace 注册断言) / DshMcpBridgeSmokeTest(mock bridge + MCP tools/list 6 工具 + failOnStartupError 严格启动) / WorkspaceInitializerSmokeTest(切换项目工作区顺序) / **LegacySessionMigratorSmokeTest(v0.1.3-dev：zstd session 迁移后 workspace.json 自动挂接)** | 需 `DSH_IDEA_RUNTIME`，否则跳过 |
 
 - 冒烟测试注意：临时 DSH_HOME 内 dsh 自愈 junction 指向 runtime → **tearDown 必须先 unlinkJunctions 再让 `@TempDir` 清理**，否则清空 runtime（见 §4）。
-- 测试计数：**237 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 237 为准**。
+- 测试计数：**240 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 240 为准**。
 
 ---
 

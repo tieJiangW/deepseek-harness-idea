@@ -1,6 +1,6 @@
 # PRD §7 验收清单走查（Step 5 起，随版本持续跟踪——当前 v0.2.5）
 
-执行日期：2026-08-19 ｜ 最近复核：2026-10-18（v0.2.5：自动化测试 237/237 全部通过）｜ 依据：docs/PRD.md §7 成功标准
+执行日期：2026-08-19 ｜ 最近复核：2026-10-18（v0.2.5：自动化测试 240/240 全部通过）｜ 依据：docs/PRD.md §7 成功标准
 
 | # | 验收项 | 状态 | 验证方式 | 备注 |
 |---|---|---|---|---|
@@ -20,10 +20,10 @@
 
 ## 自动化测试覆盖合计
 
-- **合计 237 项全部通过（0 失败 / 0 跳过）**；其中集成冒烟 4 项（真实 dsh 0.1.5-rc.2 运行时）：
+- **合计 240 项全部通过（0 失败 / 0 跳过）**；其中集成冒烟 4 项（真实 dsh 0.1.5-rc.2 运行时）：
   `DshBootstrapSmokeTest`（启动 + 端口 + workspace 注册）、`DshMcpBridgeSmokeTest`（7 工具 + 严格 patch 启动 + 共享配置落盘）、
   `WorkspaceInitializerSmokeTest`（切换项目置顶）、`LegacySessionMigratorSmokeTest`（zstd session 迁移 + workspace 挂接）
-- 版本演进：36（Step 0–5）→ 45（v0.1.1）→ 90（v0.1.3-dev）→ 113（v0.2.0）→ 122（v0.2.1）→ 130（v0.2.3）→ 194（v0.2.4）→ **237（v0.2.5）**
+- 版本演进：36（Step 0–5）→ 45（v0.1.1）→ 90（v0.1.3-dev）→ 113（v0.2.0）→ 122（v0.2.1）→ 130（v0.2.3）→ 194（v0.2.4）→ **240（v0.2.5）**
 - v0.2.5 新增：`SharedProfilesLinkTest`（11 例：链接四态——不存在/真实目录/正确链接/指向别处/目标未建，
   播种与回填清单，`hasUserContent` 的 `node_modules` 与 patch `insert` 判定）、
   `DshProfileManifestTest`（14 例：真实 pnpm/dsh manifest 形状、转义与非字符串字段、损坏/空输入降级为 EMPTY、
@@ -31,7 +31,9 @@
   `DshPluginInstallerTest`（13 例：`dsh plugin` 参数拼装与引号、私有 pnpm 落点、shim 名、PATH 前置与 Windows `Path` 归一、
   备份清单与时间戳、profile 读取与缺省）、
   `DshPluginInstallerStreamingTest`（5 例：真实 node 跑假 `dsh bin.js`——输出**流式**到达、静默期心跳且不污染命令输出、
-  取消 2.5s 内杀进程并回滚 manifest、失败退出码透传 + manifest 回滚、运行时缺失快速失败）
+  取消 2.5s 内杀进程并回滚 manifest、失败退出码透传 + manifest 回滚、运行时缺失快速失败）、
+  `SharedConfigCleanupTest`（3 例回归：共享根遗留清理**不得**删除 `profiles`（插件真源）/`settings.yaml`/
+  `.credentials.yaml`/`sessions`/`migrated`，仍清理顶层 `node_modules`/`mcp-ide-server.mjs`/`ide.yml`，且对空目录幂等）
 
 ## 需人工 IDE 会话确认的项
 
@@ -73,6 +75,6 @@
   仍需真实 IDE 会话闭环，已归档为 [MILESTONE_REVIEW.md](./MILESTONE_REVIEW.md) 的遗留问题 A 类。
 - 自动化（逻辑层）验收项 4/6/8、第 5 项链路（含真实页面实测）、第 11/12 项的 patch 与迁移层、第 13 项的链接层与
   真实 dsh 安装/加载冒烟（含流式输出/心跳/取消/回滚），加上 v0.1.3-dev 起的迁移/全局 key 与 v0.2.x 的运行时供应/下载/鉴权/配置共享/Lexical 注入适配，
-  在 **237/237（v0.2.5，全部通过）** 测试中持续守护。
+  在 **240/240（v0.2.5，全部通过）** 测试中持续守护。
 - 插件 v0.2.4 已发布：GitHub Release（11 个资产：插件 zip + 5 平台运行时及 `.sha256`）+
   JetBrains Marketplace update **1174317**（待审核）。v0.2.5 待发布。

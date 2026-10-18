@@ -13,6 +13,8 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * DSH 运行时与 DSH_HOME 管理（应用级服务）。
@@ -79,6 +81,15 @@ class DshHomeManager : Disposable {
          * 合并语义无法安全定义，因此一律保留原物、以共享根为准。
          */
         const val MIGRATED_PROFILES_DIR = "profiles-migrated"
+
+        /**
+         * 共享配置布局版本（写进 `<共享根>/.plugin-layout-version`）。
+         *
+         * **不要再用插件版本**：marker 与插件版本绑定时，每次插件升级都会重跑一次共享配置迁移
+         * （v0.2.5 实测日志：`shared-config migration marker=0.2.4, current=0.2.5; re-running`）。
+         * 只有"共享配置的落盘布局本身改变"才需要提升此值。
+         */
+        const val SHARED_CONFIG_LAYOUT_VERSION = "layout-1"
 
         private val WEB_PROFILE_MANIFEST =
             """{"name":"dsh-profile-web","private":true,"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}"""
@@ -365,6 +376,7 @@ class DshHomeManager : Disposable {
      * `node_modules` junction（配置面由 patch 指向共享根，MCP 脚本依赖由运行时树解析）。
      */
     fun ensureHome(projectPath: String): Path {
+        val startedAt = System.currentTimeMillis()
         val shared = sharedConfigRoot()
         Files.createDirectories(shared)
 
@@ -374,8 +386,9 @@ class DshHomeManager : Disposable {
         // v0.1.2 遗留（共享根曾同时是全局 DSH_HOME）+ 每项目遗留 junction/脚本清理
         SharedConfigMigrator.cleanLegacySharedRoot(shared)
 
-        // 一次性配置迁移：项目目录 settings/credentials → 合并进共享文档并备份原文件
-        val outcome = SharedConfigMigrator.migrateIfNeeded(shared, projectHomes(), pluginVersion())
+        // 一次性配置迁移：项目目录 settings/credentials → 合并进共享文档并备份原文件。
+        // marker 用**布局版本**而不是插件版本：否则每次插件升级都会重跑一次（v0.2.5 实测）。
+        val outcome = SharedConfigMigrator.migrateIfNeeded(shared, projectHomes(), SHARED_CONFIG_LAYOUT_VERSION)
         if (outcome.ran) {
             LOG.info(
                 "shared-config migration: seeded=${outcome.seededSettings} projects=${outcome.migratedProjects} " +
@@ -383,25 +396,59 @@ class DshHomeManager : Disposable {
             )
         }
 
-        // 每项目 DSH_HOME（数据面）
-        val home = homeDir(projectPath)
-        // v0.2.5：把 profiles 链接到共享根 —— dsh 插件「装一次、多项目生效」；数据面仍留在本项目 home
-        ensureProfiles(home, projectPath)
-        val web = home.resolve("profiles/web")
-        Files.createDirectories(web)
+        // 每项目 DSH_HOME（数据面）+ profiles 共享链接 + profile 骨架（轻量、加锁、可重入）
+        val afterMigration = System.currentTimeMillis()
+        val home = ensureProfileHome(projectPath)
+        val afterProfiles = System.currentTimeMillis()
 
-        writeIfAbsent(web.resolve("package.json"), WEB_PROFILE_MANIFEST)
-        writeIfAbsent(web.resolve("cordis.yml"), "[]\n")
-        writeIfAbsent(web.resolve("cordis.patch.yml"), "# 本层由插件通过 --patch 覆盖，不在此修改\n[]\n")
         writeIfAbsent(home.resolve(IDE_PATCH_FILE), "[]\n")
 
         cleanLegacyProjectHome(home)
         prefillAcknowledgeWelcomeNotice()
         migrateLegacySessions(home, projectPath)
+        // 分段耗时：v0.2.5 用户反馈"刷新卡住"时靠它定位（迁移 187MB 的 profiles 实测仅 ~100ms，
+        // 慢的往往不是这里，而是被误挂上来的重量级步骤，见 ensureProfileHome 注释）
+        LOG.info(
+            "ensureHome($projectPath): config=${afterMigration - startedAt}ms " +
+                "profiles=${afterProfiles - afterMigration}ms total=${System.currentTimeMillis() - startedAt}ms"
+        )
         return home
     }
 
     // ---- 共享 dsh profile（v0.2.5：插件「装一次、多项目生效」） ----
+
+    /**
+     * 串行化 profile 链接的建立/迁移。
+     *
+     * 设置页刷新、安装、以及 dsh 启动前的 [ensureHome] 可能并发进来：两个 `mklink /J` 抢同一个
+     * 链接时，后一个会因"已存在"失败并被误判为建链失败（进而降级成项目独立 profile）。
+     * 用可重入锁覆盖全部入口，代价只有一次毫秒级等待。
+     */
+    private val profileHomeLock = ReentrantLock()
+
+    /**
+     * 轻量版「确保本项目的 profile 目录就绪」：只做与 profile **直接相关**的事 ——
+     * 建/修 `profiles` 共享链接、建 `profiles/web` 骨架、补齐三个 seed 文件。
+     *
+     * **为什么不复用 [ensureHome]**：那是"启动 dsh 前的一次性初始化"，还包含共享配置迁移、
+     * 全局 MCP 脚本部署、legacy session 迁移与遗留清理。设置页的刷新/安装只需要读写 profile，
+     * 把这些重量级步骤挂上去会让它们偶发地长时间无响应（v0.2.5 用户实测：点「刷新」后一直停在
+     * "Reading the profile…"）。那些步骤会在 dsh 启动时由 [ensureHome] 正常完成。
+     *
+     * 加锁：并发刷新/安装同时进来时避免两个 `mklink` 抢同一个链接（后者会因"已存在"失败并被误判）。
+     * 锁可重入，[ensureHome] 同线程再调一次不会自锁。
+     */
+    fun ensureProfileHome(projectPath: String): Path = profileHomeLock.withLock {
+        val home = homeDir(projectPath)
+        Files.createDirectories(home)
+        ensureProfiles(home, projectPath)
+        val web = home.resolve("profiles/web")
+        Files.createDirectories(web)
+        writeIfAbsent(web.resolve("package.json"), WEB_PROFILE_MANIFEST)
+        writeIfAbsent(web.resolve("cordis.yml"), "[]\n")
+        writeIfAbsent(web.resolve("cordis.patch.yml"), "# 本层由插件通过 --patch 覆盖，不在此修改\n[]\n")
+        home
+    }
 
     /**
      * 确保本项目的 `profiles` 指向共享 profile 根（[sharedProfilesRoot]）。
