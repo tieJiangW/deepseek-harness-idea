@@ -72,8 +72,28 @@ internal object DshPluginInstaller {
         /** 超时被杀。 */
         TIMEOUT,
 
+        /** 用户取消。 */
+        CANCELLED,
+
         /** 其它异常（IO 等）。 */
         ERROR,
+    }
+
+    /**
+     * 当前阶段（供 UI 显示"卡在哪一步"）。
+     *
+     * `pnpm add` 在静默下载时可能几十秒不输出任何行，用户会以为没反应 —— 因此阶段文本必须
+     * 先于输出出现（尤其首次安装要先下 pnpm）。
+     */
+    enum class Phase {
+        /** 校验运行时、准备目录。 */
+        CHECKING,
+
+        /** 首次准备私有 pnpm（联网 `npm install pnpm`，约 10–60s）。 */
+        PREPARING_PNPM,
+
+        /** 正在执行 `dsh plugin …`（pnpm 安装/卸载包）。 */
+        RUNNING,
     }
 
     /** 一次安装/卸载的结果。 */
@@ -86,6 +106,8 @@ internal object DshPluginInstaller {
         val failure: Failure? = null,
         /** 失败摘要（已足够人类可读，不含 i18n）。 */
         val detail: String? = null,
+        /** 用时（毫秒；UI 显示"装好了，用了 42s"）。 */
+        val elapsedMs: Long = 0L,
     )
 
     /** 串行化：两个 IDE 窗口同时装插件会把同一个 profile 的 lockfile 写坏。 */
@@ -159,10 +181,15 @@ internal object DshPluginInstaller {
     /**
      * 安装（[action] = `add`）或卸载（`remove`）一个插件包。
      *
+     * **过程可见**：`pnpm add` 静默下载时可能几十秒没有输出，用户会以为卡死。因此本方法全程
+     * 通过 [onPhase]（阶段）与 [onLine]（每一行输出）回报进度，两者都**可能在后台线程被调用**，
+     * UI 侧需自行切到 EDT。这两个回调只做展示，异常被吞掉（绝不影响安装本身）。
+     *
      * @param projectHome 项目的 DSH_HOME（`DSH_HOME` 环境变量指向它，dsh 据此解析 profile 目录）。
      * @param sharedRoot 共享配置根（私有 pnpm 与备份都放这里；与项目无关）。
      * @param nodeExe 运行时 node。
      * @param dshBin 运行时的 `@deepseek-ai/dsh/lib/bin.js`。
+     * @param cancelled 轮询取消信号（用户在 UI 点「取消」）；返回 true 时杀子进程并回滚 manifest。
      */
     fun run(
         projectHome: Path,
@@ -171,22 +198,38 @@ internal object DshPluginInstaller {
         dshBin: Path,
         action: String,
         spec: String?,
+        onPhase: (Phase) -> Unit = {},
+        onLine: (String) -> Unit = {},
+        cancelled: () -> Boolean = { false },
     ): Outcome {
+        val startedAt = System.currentTimeMillis()
         val profileDir = projectHome.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME)
         val before = readProfile(projectHome)
+        fun outcome(
+            ok: Boolean,
+            output: String,
+            profile: DshProfileManifest.Profile,
+            failure: Failure? = null,
+            detail: String? = null,
+        ) = Outcome(ok, output, profile, failure, detail, System.currentTimeMillis() - startedAt)
+        fun progress(phase: Phase) {
+            runCatching { onPhase(phase) }
+        }
+
+        progress(Phase.CHECKING)
         if (!Files.isRegularFile(nodeExe) || !Files.isRegularFile(dshBin)) {
-            return Outcome(false, "", before, Failure.NO_RUNTIME, "missing runtime: node=$nodeExe dsh=$dshBin")
+            return outcome(false, "", before, Failure.NO_RUNTIME, "missing runtime: node=$nodeExe dsh=$dshBin")
         }
         if (!lock.tryLock(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-            return Outcome(false, "", before, Failure.COMMAND_FAILED, "another plugin operation is still running")
+            return outcome(false, "", before, Failure.COMMAND_FAILED, "another plugin operation is still running")
         }
         try {
             Files.createDirectories(profileDir)
             val pnpm = try {
-                ensurePnpm(sharedRoot, nodeExe)
+                ensurePnpm(sharedRoot, nodeExe, onLine) { progress(Phase.PREPARING_PNPM) }
             } catch (e: Exception) {
                 LOG.warn("failed to prepare the private pnpm under $sharedRoot", e)
-                return Outcome(false, "", before, Failure.PNPM_SETUP_FAILED, e.message)
+                return outcome(false, "", before, Failure.PNPM_SETUP_FAILED, e.message)
             }
 
             val backup = backupProfile(profileDir, sharedRoot)
@@ -198,16 +241,20 @@ internal object DshPluginInstaller {
                 // node 自身也在 PATH 里：pnpm 执行生命周期脚本时会用到
                 put("PATH", nodeExe.parent.toString() + File.pathSeparator + getValue("PATH"))
             }
-            val (code, output) = exec(cmd, profileDir, env)
+            progress(Phase.RUNNING)
+            val (code, output) = exec(cmd, profileDir, env, onLine, cancelled)
             if (code != 0) {
                 restoreProfile(backup, profileDir)
-                val timedOut = code == TIMEOUT_EXIT
                 LOG.warn("dsh plugin $action failed (exit=$code) for $profileDir; profile manifest restored")
-                return Outcome(
+                return outcome(
                     ok = false,
                     output = output,
                     profile = readProfile(projectHome),
-                    failure = if (timedOut) Failure.TIMEOUT else Failure.COMMAND_FAILED,
+                    failure = when (code) {
+                        TIMEOUT_EXIT -> Failure.TIMEOUT
+                        CANCEL_EXIT -> Failure.CANCELLED
+                        else -> Failure.COMMAND_FAILED
+                    },
                     detail = "exit=$code",
                 )
             }
@@ -216,10 +263,10 @@ internal object DshPluginInstaller {
                 "dsh plugin $action ok for $profileDir: bundles=${after.bundles.size} " +
                     "plugins=${after.plugins} deps=${after.dependencies.size} backup=$backup",
             )
-            return Outcome(true, output, after)
+            return outcome(true, output, after)
         } catch (e: Exception) {
             LOG.warn("dsh plugin $action crashed for $profileDir", e)
-            return Outcome(false, "", readProfile(projectHome), Failure.ERROR, e.message ?: e.toString())
+            return outcome(false, "", readProfile(projectHome), Failure.ERROR, e.message ?: e.toString())
         } finally {
             lock.unlock()
         }
@@ -228,12 +275,21 @@ internal object DshPluginInstaller {
     /** 子进程被超时杀掉时使用的退出码哨兵（真实进程不会返回它）。 */
     private const val TIMEOUT_EXIT = -99
 
+    /** 用户取消时使用的退出码哨兵。 */
+    private const val CANCEL_EXIT = -98
+
     /**
      * 准备私有 pnpm（首次会联网 `npm install pnpm@<ver>`，之后直接复用），返回 shim 目录。
      *
      * 用运行时**自带的 npm**而不是系统 npm：插件保证运行时内有 node+npm，且版本可控。
+     * 首次安装要下载 pnpm（几十 MB），这里先通知 [onPhase] 再执行，避免 UI 长时间停在"准备中"。
      */
-    private fun ensurePnpm(sharedRoot: Path, nodeExe: Path): Path {
+    private fun ensurePnpm(
+        sharedRoot: Path,
+        nodeExe: Path,
+        onLine: (String) -> Unit,
+        onPhase: () -> Unit,
+    ): Path {
         val tools = toolsDir(sharedRoot)
         val shim = shimDir(sharedRoot)
         val cli = pnpmCli(tools)
@@ -244,16 +300,18 @@ internal object DshPluginInstaller {
         val npmCli = nodeExe.parent.resolve("node_modules/npm/bin/npm-cli.js")
         if (!Files.isRegularFile(npmCli)) throw java.io.IOException("npm-cli.js not found next to $nodeExe (looked at $npmCli)")
 
+        onPhase()
         Files.createDirectories(tools)
         val (code, output) = exec(
             listOf(
                 nodeExe.toString(), npmCli.toString(), "install",
                 "--prefix", tools.toString(),
                 "pnpm@$PNPM_VERSION",
-                "--no-audit", "--no-fund", "--loglevel=error",
+                "--no-audit", "--no-fund", "--loglevel=notice",
             ),
             tools,
             System.getenv(),
+            onLine,
         )
         if (code != 0 || !Files.isRegularFile(cli)) {
             throw java.io.IOException("npm install pnpm@$PNPM_VERSION failed (exit=$code): ${output.takeLast(600)}")
@@ -315,8 +373,21 @@ internal object DshPluginInstaller {
         }
     }
 
-    /** 执行命令并合并输出；超时则杀进程树并返回 [TIMEOUT_EXIT]。 */
-    private fun exec(cmd: List<String>, cwd: Path, env: Map<String, String>): Pair<Int, String> {
+    /**
+     * 执行命令并合并输出。
+     *
+     * - 每读到一行就回调 [onLine]，并顺手行尾"心跳"（[HEARTBEAT]）告诉 UI 进程还活着 ——
+     *   pnpm 在解析/下载依赖时可能长时间不打印，没有心跳用户就无法区分"在下载"和"卡死"。
+     * - 轮询等待而非 `waitFor(timeout)`：这样才能响应 [cancelled]（用户点「取消」）；
+     *   超时与取消分别返回 [TIMEOUT_EXIT] / [CANCEL_EXIT]。
+     */
+    private fun exec(
+        cmd: List<String>,
+        cwd: Path,
+        env: Map<String, String>,
+        onLine: (String) -> Unit = {},
+        cancelled: () -> Boolean = { false },
+    ): Pair<Int, String> {
         val pb = ProcessBuilder(cmd)
         pb.directory(cwd.toFile())
         pb.environment().putAll(env)
@@ -328,18 +399,46 @@ internal object DshPluginInstaller {
                 process.inputStream.bufferedReader().useLines { lines ->
                     lines.forEach { line ->
                         synchronized(output) { output.append(line).append('\n') }
+                        runCatching { onLine(line) }
                     }
                 }
             }
         }.apply { isDaemon = true; name = "dsh-plugin-io"; start() }
-        val finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        if (!finished) {
-            runCatching { process.destroyForcibly() }
-            runCatching { process.waitFor(10, TimeUnit.SECONDS) }
-            runCatching { reader.join(2000) }
-            return TIMEOUT_EXIT to synchronized(output) { output.toString() }
+
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS)
+        var lastBeat = System.currentTimeMillis()
+        while (process.isAlive) {
+            if (cancelled()) {
+                kill(process, reader)
+                return CANCEL_EXIT to synchronized(output) { output.toString() }
+            }
+            if (System.nanoTime() > deadline) {
+                kill(process, reader)
+                return TIMEOUT_EXIT to synchronized(output) { output.toString() }
+            }
+            // 每 2s 一次心跳：pnpm 静默下载时 UI 靠它显示"仍在运行（已 Ns）"
+            val now = System.currentTimeMillis()
+            if (now - lastBeat >= 2000) {
+                lastBeat = now
+                runCatching { onLine(HEARTBEAT) }
+            }
+            // 200ms 的轮询粒度：取消要"立刻"反应，又不能空转烧 CPU
+            runCatching { process.waitFor(200, TimeUnit.MILLISECONDS) }
         }
         runCatching { reader.join(5000) }
         return process.exitValue() to synchronized(output) { output.toString() }
     }
+
+    /** 杀进程并收尾（输出读线程、退出码都不再关心）。 */
+    private fun kill(process: Process, reader: Thread) {
+        runCatching { process.destroyForcibly() }
+        runCatching { process.waitFor(10, TimeUnit.SECONDS) }
+        runCatching { reader.join(2000) }
+    }
+
+    /**
+     * 心跳标记（只经 [run] 的 `onLine` 回调传给 UI，**不**写进命令输出）。
+     * UI 用它显示"仍在运行 / 已用 N 秒"，从而区分"在下载"与"卡死"。
+     */
+    const val HEARTBEAT = "\u0000heartbeat"
 }

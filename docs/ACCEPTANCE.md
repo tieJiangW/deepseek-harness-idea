@@ -1,6 +1,6 @@
 # PRD §7 验收清单走查（Step 5 起，随版本持续跟踪——当前 v0.2.5）
 
-执行日期：2026-08-19 ｜ 最近复核：2026-10-18（v0.2.5：自动化测试 232/232 全部通过）｜ 依据：docs/PRD.md §7 成功标准
+执行日期：2026-08-19 ｜ 最近复核：2026-10-18（v0.2.5：自动化测试 237/237 全部通过）｜ 依据：docs/PRD.md §7 成功标准
 
 | # | 验收项 | 状态 | 验证方式 | 备注 |
 |---|---|---|---|---|
@@ -16,20 +16,22 @@
 | 10 | 设置页「运行时下载地址」反显当前生效值 + 「默认」按钮；「运行时目录」可指定且「默认」按钮填入插件默认目录 | ✅ 自动（逻辑层） | `DshHomeManagerRuntimeRootTest`（优先级与路径等价、共享根解析）、`RuntimeAssetsTest`（含直连文件 URL 用例） | UI 交互需 IDE 会话确认 |
 | 11 | **在一个项目新增自定义模型/provider 后重启 IDEA，配置仍在；其它项目同样可见** | ✅ 自动（迁移与 patch 层）+ ⏳ 手工 | `McpPatchGeneratorTest`（四段 patch 指向共享根）、`SharedConfigMigratorTest`（按 namespace 合并与备份）、`DshMcpBridgeSmokeTest`（真实 dsh 不写项目级配置文件） | **v0.2.4 核心修复**；端到端"Web UI 加模型 → 重启 → 仍在"仍需真实 IDE 会话确认（见「需人工确认」第 10 项） |
 | 12 | Agent 预设与个人技能跨项目共享 | ✅ 自动（patch 层）+ ⏳ 手工 | `McpPatchGeneratorTest`（`agent-presets` 重述 `default` + `includeUserRoot: false`、`skill-filesystem.dshHome`） | 需真实会话确认创建/删除预设可用（`copy()`/`remove()` 只认第一个 user 根） |
-| 13 | **在一个项目安装 dsh 插件包，其它项目也加载** | ✅ 自动（链接层 + 真实 dsh 冒烟） | `SharedProfilesLinkTest`（四态判定，真实 junction）、`DshPluginInstallerTest`（参数/私有 pnpm/备份）、`DshProfileManifestTest`（manifest 与规格校验）+ **真实 dsh 冒烟**（本机实测：`dsh plugin --profile web add link:<插件>` 落进共享 profile 且 `bundles` 自动追加；从另一个 DSH_HOME 启动打印 `SHARED-PLUGIN-LOADED`） | v0.2.5 核心；UI 交互（设置页「DSH 插件」+ 工具窗动作）需 IDE 会话手工确认（见「需人工确认」第 12 项） |
+| 13 | **在一个项目安装 dsh 插件包，其它项目也加载** | ✅ 自动（链接层 + 真实 dsh 冒烟） | `SharedProfilesLinkTest`（四态判定，真实 junction）、`DshPluginInstallerTest`（参数/私有 pnpm/备份）、`DshProfileManifestTest`（manifest 与规格校验）、`DshPluginInstallerStreamingTest`（流式输出/心跳/取消/失败回滚）+ **真实 dsh 冒烟**（本机实测：`dsh plugin --profile web add link:<插件>` 落进共享 profile 且 `bundles` 自动追加；从另一个 DSH_HOME 启动打印 `SHARED-PLUGIN-LOADED`） | v0.2.5 核心；UI 交互（设置页「DSH 插件」+ 工具窗动作）需 IDE 会话手工确认（见「需人工确认」第 12 项）。**安装过程反馈**：定时进度条 + 每秒用时 + 阶段文案 + 实时输出 + 静默提示 + 可取消 + 绿✓/红✗ 结果 + IDE 通知 |
 
 ## 自动化测试覆盖合计
 
-- **合计 232 项全部通过（0 失败 / 0 跳过）**；其中集成冒烟 4 项（真实 dsh 0.1.5-rc.2 运行时）：
+- **合计 237 项全部通过（0 失败 / 0 跳过）**；其中集成冒烟 4 项（真实 dsh 0.1.5-rc.2 运行时）：
   `DshBootstrapSmokeTest`（启动 + 端口 + workspace 注册）、`DshMcpBridgeSmokeTest`（7 工具 + 严格 patch 启动 + 共享配置落盘）、
   `WorkspaceInitializerSmokeTest`（切换项目置顶）、`LegacySessionMigratorSmokeTest`（zstd session 迁移 + workspace 挂接）
-- 版本演进：36（Step 0–5）→ 45（v0.1.1）→ 90（v0.1.3-dev）→ 113（v0.2.0）→ 122（v0.2.1）→ 130（v0.2.3）→ 194（v0.2.4）→ **232（v0.2.5）**
+- 版本演进：36（Step 0–5）→ 45（v0.1.1）→ 90（v0.1.3-dev）→ 113（v0.2.0）→ 122（v0.2.1）→ 130（v0.2.3）→ 194（v0.2.4）→ **237（v0.2.5）**
 - v0.2.5 新增：`SharedProfilesLinkTest`（11 例：链接四态——不存在/真实目录/正确链接/指向别处/目标未建，
   播种与回填清单，`hasUserContent` 的 `node_modules` 与 patch `insert` 判定）、
   `DshProfileManifestTest`（14 例：真实 pnpm/dsh manifest 形状、转义与非字符串字段、损坏/空输入降级为 EMPTY、
   插件与纯依赖分类、规格校验——空 / `-` 开头 / 空白与 shell 元字符 / 相对路径 / `^` 需加引号）、
   `DshPluginInstallerTest`（13 例：`dsh plugin` 参数拼装与引号、私有 pnpm 落点、shim 名、PATH 前置与 Windows `Path` 归一、
-  备份清单与时间戳、profile 读取与缺省）
+  备份清单与时间戳、profile 读取与缺省）、
+  `DshPluginInstallerStreamingTest`（5 例：真实 node 跑假 `dsh bin.js`——输出**流式**到达、静默期心跳且不污染命令输出、
+  取消 2.5s 内杀进程并回滚 manifest、失败退出码透传 + manifest 回滚、运行时缺失快速失败）
 
 ## 需人工 IDE 会话确认的项
 
@@ -55,10 +57,12 @@
     旧项目级 `settings.yaml` / `.credentials.yaml`；若迁移失败则不写 `.plugin-layout-version` 并在下次启动重试。
 12. **v0.2.5 dsh 插件安装 UI 端到端**（最高优先）：① 打开项目 A 的工具窗标题栏「DSH 插件」动作 → 设置页显示
     `profile 目录` 已指向 `<共享根>/profiles/web`、共享状态为"已开启"；② 输入一个真实插件包名（如带 `^` 版本范围）
-    点「安装」→ 出现 pnpm 输出、表格新增该插件、「重启 Harness」后插件生效（可看 DSH Log 或插件自身日志）；
-    ③ 打开项目 B，同一插件已在列表中（无需重装）；④ 在 B 中「卸载」→ 重启后 A 也不再有该插件（共享的必然结果）；
-    ⑤ 取消勾选「跨项目共享 dsh 插件包」→ A/B 的 `profiles` 变回真实目录（`dir` 可见），共享根与
-    `<共享根>/profiles` **未被删除**；重新勾选后恢复共享且插件仍在。
+    点「安装」→ **应立即看到**：不定进度条 + "正在安装 x（已 N 秒）"逐秒刷新、输出区实时打印 pnpm 行（首次会先出现
+    "正在准备 pnpm（首次需要联网下载）"）、静默 6 秒后状态追加"仍在运行…"、结束后出现绿色 `✓ 已安装 x —— 用时 N 秒`
+    并弹 IDE 通知；③ 表格新增该插件，「重启 Harness」后插件生效；④ 安装过程中点「取消」应立即停止（约 1 秒内）
+    且状态显示已取消、manifest 未被破坏；⑤ 打开项目 B，同一插件已在列表中（无需重装）；⑥ 在 B 中「卸载」→ 重启后
+    A 也不再有该插件（共享的必然结果）；⑦ 取消勾选「跨项目共享 dsh 插件包」→ A/B 的 `profiles` 变回真实目录，
+    共享根与 `<共享根>/profiles` **未被删除**；重新勾选后恢复共享且插件仍在。
 13. 首次升级到 v0.2.5 时的迁移体验：若某项目此前装过插件（`profiles/web/node_modules` 存在），日志应出现
     `migrated the project profile to the shared root: backup=…`，`<共享根>/profiles-migrated/<hash>/` 下能看到被移走的
     整份旧 profile（**未合并**，以共享根为准）；链接建立失败时该项目应继续用独立 profile（设置页显示原因）、dsh 仍能启动。
@@ -68,7 +72,7 @@
 - 手工验收项（安装 / 真实对话 / diff UI / 注入效果 / 进程清理 / **配置共享化端到端** / **插件安装 UI 端到端**）
   仍需真实 IDE 会话闭环，已归档为 [MILESTONE_REVIEW.md](./MILESTONE_REVIEW.md) 的遗留问题 A 类。
 - 自动化（逻辑层）验收项 4/6/8、第 5 项链路（含真实页面实测）、第 11/12 项的 patch 与迁移层、第 13 项的链接层与
-  真实 dsh 安装/加载冒烟，加上 v0.1.3-dev 起的迁移/全局 key 与 v0.2.x 的运行时供应/下载/鉴权/配置共享/Lexical 注入适配，
-  在 **232/232（v0.2.5，全部通过）** 测试中持续守护。
+  真实 dsh 安装/加载冒烟（含流式输出/心跳/取消/回滚），加上 v0.1.3-dev 起的迁移/全局 key 与 v0.2.x 的运行时供应/下载/鉴权/配置共享/Lexical 注入适配，
+  在 **237/237（v0.2.5，全部通过）** 测试中持续守护。
 - 插件 v0.2.4 已发布：GitHub Release（11 个资产：插件 zip + 5 平台运行时及 `.sha256`）+
   JetBrains Marketplace update **1174317**（待审核）。v0.2.5 待发布。

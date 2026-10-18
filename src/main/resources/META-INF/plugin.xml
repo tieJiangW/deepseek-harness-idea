@@ -136,6 +136,10 @@
             (pnpm under the hood); a private pnpm is provisioned once under
             <code>&lt;shared home&gt;/plugin-tools/</code> so no global pnpm is required. The profile manifest is backed
             up before each operation and restored if the command fails. Restart the harness to load or unload a plugin.</li>
+            <li><b>You can watch the install happen.</b> An indeterminate progress bar with a per-second elapsed timer,
+            the current phase (checking the runtime → preparing pnpm → installing), streamed pnpm output, a
+            "still running" hint when the child is silent, a Cancel button, and an explicit green ✓ / red ✗ result
+            (with the time taken) plus an IDE notification — so you always know whether it worked.</li>
             <li><b>插件装一次，所有项目生效。</b>每个项目的 <code>profiles/</code> 目录现在链接到统一的共享 profile 根，
             因此在一个项目中安装的插件对所有项目可见；会话、工作区与附件仍留在各自 DSH_HOME，隔离不变。可在
             <i>设置 → Tools → DeepSeek Harness</i> 中用「跨项目共享 dsh 插件包」开关控制（默认开启）；既有的项目级
@@ -146,6 +150,9 @@
             安装转发给 dsh 自己的 <code>dsh plugin --profile web add</code>（底层 pnpm）；首次会在
             <code>&lt;共享根&gt;/plugin-tools/</code> 下准备一份私有 pnpm，无需用户全局安装。每次操作前备份 profile
             manifest、失败自动回滚。安装/卸载后需重启 Harness 生效。</li>
+            <li><b>安装过程看得见。</b>不定进度条 + 每秒刷新的用时 + 当前阶段（检查运行时 → 准备 pnpm → 正在安装）+
+            实时 pnpm 输出 + 长时间无输出时"仍在运行"提示 + 「取消」按钮，结束给出绿色 ✓ / 红色 ✗（含用时）并弹
+            IDE 通知 —— 不再无从判断是否装成功。</li>
         </ul>
         <h4>v0.2.4</h4>
         <ul>

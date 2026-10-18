@@ -23,7 +23,7 @@ changes with native diff tooling.
 - **发送选中代码 / Send selection to DSH** — 右键选中代码发送紧凑文件引用（`@路径#L1-14`）；完整代码可随时被智能体拉取（剪贴板兜底）。
 - **运行日志一键解释 / One-click log explanation** — 在项目运行控制台选中一段日志，右键"DSH 一键解释"，自动把解释请求 + 日志提交给 DSH（无需手动粘贴/回车）。
 - **每项目独立工作区 / Per-project workspace** — 每个项目使用独立的 DSH_HOME，工作区按项目隔离；切换项目后 DSH 自动以当前项目为工作空间，不会残留其他项目的工作区。
-- **配置与 dsh 插件跨项目共享 / Shared config & dsh plugins** — 模型、供应商、API Key、Agent 预设、个人技能在共享配置目录里配置一次即对所有项目生效；**dsh 插件包同样"装一次、多项目生效"**（`Settings → Tools → DeepSeek Harness → DSH Plugins` 安装/卸载，或点工具窗标题栏的插件图标；插件自备私有 pnpm，无需用户全局安装；安装后重启 Harness 加载）。会话、工作区与附件仍按项目隔离。
+- **配置与 dsh 插件跨项目共享 / Shared config & dsh plugins** — 模型、供应商、API Key、Agent 预设、个人技能在共享配置目录里配置一次即对所有项目生效；**dsh 插件包同样"装一次、多项目生效"**（`Settings → Tools → DeepSeek Harness → DSH Plugins` 安装/卸载，或点工具窗标题栏的插件图标；插件自备私有 pnpm，无需用户全局安装；安装时显示进度条、实时输出与用时，可取消，结束给出 ✓/✗ 并弹通知；装好后重启 Harness 加载）。会话、工作区与附件仍按项目隔离。
 - **审查与还原 / Review & restore** — 基线快照 + 原生 diff（修改/新增/删除），支持还原单个/全部、忽略、重新基线。
 - **自动供给的运行时 / Self-provisioned runtime** — 插件默认**不捆绑**运行时（瘦身包约 1.8MB）：首次使用按当前平台自动下载 Node.js 22.x + DeepSeek Harness 运行时（SHA-256 校验，缓存后离线复用）；也可在设置页用「运行时目录」或「选择本地运行时压缩包…」完全离线指定，或用 `-Pthin=false` 构建内置运行时的 fat 包。
 - **生命周期管理 / Lifecycle** — 每项目一个实例（并发上限 3）；项目关闭 / IDE 退出自动终止进程；崩溃自动退避重启。
@@ -123,7 +123,7 @@ Node 子进程（DSH）
 
 ## 测试 / Tests
 
-- **232 个测试**：228 单元 + 4 集成冒烟（真实 dsh 启动 / MCP 桥接 7 工具 / 切换项目工作区顺序 / 旧会话升级迁移）。
+- **232 → 237 个测试**：233 单元 + 4 集成冒烟（真实 dsh 启动 / MCP 桥接 7 工具 / 切换项目工作区顺序 / 旧会话升级迁移）。
 - 冒烟测试需要 `DSH_IDEA_RUNTIME` 指向预构建运行时目录，否则自动跳过。
 
 ## 许可 / License

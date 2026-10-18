@@ -184,6 +184,22 @@ src/main/resources/
 可能包含只装在共享 `node_modules` 里的插件，原样搬到独立目录会让 dsh fail-loud 起不来；共享根与会装插件保留不删，
 重新开启即恢复。
 
+**安装过程反馈（v0.2.5 用户反馈"不知道是否装成功"后补做）**：旧版只有一行 "Installing …" + 空白输出区。根因是
+`pnpm add` 静默下载时几十秒不打印，且旧实现把输出**攒到命令结束**才一次性显示（`exec` 只用 `waitFor` 收尾）。
+现在的做法（`DshPluginInstaller` + `DshPluginsConfigurable`）：
+
+- `onPhase` 回报 `CHECKING / PREPARING_PNPM / RUNNING`（首次装 pnpm 必须说明"要联网、要等"）；
+- `onLine` 每行回调 → UI 150ms 节流刷新（逐行 `setText` 是 O(n²)，pnpm 进度行可上千行），最多保留 4000 行；
+- 2s 心跳（`onLine(HEARTBEAT)`，**不进命令输出**）+ 6s 无输出时提示"仍在运行…可取消"；
+- `exec` 改 200ms 轮询（而非 `waitFor(timeout)`）：既支持取消（`destroyForcibly` + 回滚 manifest），
+  又在超时/取消时返回哨兵退出码（-99 / -98）而不是抛异常；
+- 结束态：绿 `✓ …（用时 N 秒）` / 红 `✗ 原因`，结果行同时写进输出区，并发 IDE 通知（用户常切走窗口）；
+- 关闭设置页（`disposeUIResources`）会中止在跑的安装，不留看不见的后台任务。
+
+**踩坑**：取消动作的方法**不能**命名为 `cancel()` —— `Configurable.cancel()` 是设置对话框「Cancel」的回调，
+Kotlin 会要求 `override` 且语义完全相反；实现里叫 `cancelOperation()`。另：UI 定时器必须用
+`javax.swing.Timer`（在 EDT 触发），后台线程直接改 Swing 组件会随机出问题。
+
 ### v0.2.1（2026-09-02）首次使用运行时下载：失败修复 + 可靠性 + UX（发布条目）
 
 - 修复首次使用下载失败：临时文件父目录缺失 → `NoSuchFileException`；现**先创建父目录再写入**。
@@ -639,11 +655,11 @@ x64 对应 `*-darwin-x64`）。
 
 | 层 | 类 | 说明 |
 |---|---|---|
-| 单元 | PortParserTest(4) / McpPatchGeneratorTest(6) / SnapshotDiffTest(5) / PathFiltersTest(5) / SentSelectionQueueTest(5) / WorkspaceInitializerTest(12) / DshRuntimeRegistryTest(3) / CredentialImporterTest(4) / **JsonCodecTest(v0.1.1,9)** / **ExplainLogComposerTest(v0.1.3-dev,4)** / **LegacySessionMigratorTest(v0.1.3-dev,14)** / **DshCredentialsMaskTest(v0.1.3-dev,10)** / **DshCredentialsSyncTest(v0.1.3-dev,5)** / **PlatformTest(v0.2.0,10)** / **RuntimeAssetsTest(v0.2.0,6)** / **RuntimeProvisionerTest(v0.2.0,7)** / **SharedProfilesLinkTest(v0.2.5,11)** / **DshProfileManifestTest(v0.2.5,14)** / **DshPluginInstallerTest(v0.2.5,13)** | 纯 JUnit，无 IDE 依赖 |
+| 单元 | PortParserTest(4) / McpPatchGeneratorTest(6) / SnapshotDiffTest(5) / PathFiltersTest(5) / SentSelectionQueueTest(5) / WorkspaceInitializerTest(12) / DshRuntimeRegistryTest(3) / CredentialImporterTest(4) / **JsonCodecTest(v0.1.1,9)** / **ExplainLogComposerTest(v0.1.3-dev,4)** / **LegacySessionMigratorTest(v0.1.3-dev,14)** / **DshCredentialsMaskTest(v0.1.3-dev,10)** / **DshCredentialsSyncTest(v0.1.3-dev,5)** / **PlatformTest(v0.2.0,10)** / **RuntimeAssetsTest(v0.2.0,6)** / **RuntimeProvisionerTest(v0.2.0,7)** / **SharedProfilesLinkTest(v0.2.5,11)** / **DshProfileManifestTest(v0.2.5,14)** / **DshPluginInstallerTest(v0.2.5,13)** / **DshPluginInstallerStreamingTest(v0.2.5,5)** | 纯 JUnit，无 IDE 依赖 |
 | 集成冒烟 | DshBootstrapSmokeTest(真实 dsh 启动 + workspace 注册断言) / DshMcpBridgeSmokeTest(mock bridge + MCP tools/list 6 工具 + failOnStartupError 严格启动) / WorkspaceInitializerSmokeTest(切换项目工作区顺序) / **LegacySessionMigratorSmokeTest(v0.1.3-dev：zstd session 迁移后 workspace.json 自动挂接)** | 需 `DSH_IDEA_RUNTIME`，否则跳过 |
 
 - 冒烟测试注意：临时 DSH_HOME 内 dsh 自愈 junction 指向 runtime → **tearDown 必须先 unlinkJunctions 再让 `@TempDir` 清理**，否则清空 runtime（见 §4）。
-- 测试计数：**232 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 232 为准**。
+- 测试计数：**237 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 237 为准**。
 
 ---
 
