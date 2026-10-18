@@ -19,6 +19,43 @@ class DshPluginInstallerTest {
     @TempDir
     lateinit var tmp: Path
 
+    // ---- node_modules 兼容性（v0.2.5 用户实测 ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF） ----
+
+    @Test
+    fun `reads the existing virtual store max length`() {
+        val modulesYaml = """
+            hoistPattern:
+              - '*'
+            publicHoistPattern: []
+            virtualStoreDirMaxLength: 80
+            packageManager: pnpm@9.15.9
+        """.trimIndent()
+        assertEquals(80, DshPluginInstaller.virtualStoreMaxLength(modulesYaml))
+    }
+
+    @Test
+    fun `missing or malformed modules yaml yields null`() {
+        assertEquals(null, DshPluginInstaller.virtualStoreMaxLength(null))
+        assertEquals(null, DshPluginInstaller.virtualStoreMaxLength(""))
+        assertEquals(null, DshPluginInstaller.virtualStoreMaxLength("virtualStoreDirMaxLength: \n"))
+        assertEquals(null, DshPluginInstaller.virtualStoreMaxLength("something: else"))
+    }
+
+    @Test
+    fun `only modules-state errors are treated as self healable`() {
+        assertTrue(
+            DshPluginInstaller.isSelfHealableModulesError(
+                "ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF  This modules directory was created using a different ...",
+            ),
+        )
+        assertTrue(DshPluginInstaller.isSelfHealableModulesError("ERR_PNPM_UNEXPECTED_STORE  Unexpected store location"))
+        assertTrue(DshPluginInstaller.isSelfHealableModulesError("ERR_PNPM_MODULES_BREAKING_CHANGE"))
+        // 网络/权限/包不存在 → 重建 node_modules 只会白费一次下载
+        assertTrue(!DshPluginInstaller.isSelfHealableModulesError("ERR_PNPM_FETCH_404  dshmarket is not in the registry"))
+        assertTrue(!DshPluginInstaller.isSelfHealableModulesError("EACCES: permission denied"))
+        assertTrue(!DshPluginInstaller.isSelfHealableModulesError(""))
+    }
+
     // ---- 命令行拼装 ----
 
     @Test

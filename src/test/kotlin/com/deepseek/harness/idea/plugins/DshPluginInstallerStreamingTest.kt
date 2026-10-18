@@ -259,6 +259,59 @@ class DshPluginInstallerStreamingTest {
     }
 
     @Test
+    fun `an incompatible node_modules is quarantined and the command retried once`() {
+        val shared = sharedRoot()
+        presetPnpm(shared)
+        val home = projectHome(manifest)
+        val web = home.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME)
+        // 现有 node_modules 是"别的 pnpm 配置"建的：带 .modules.yaml 的 virtualStoreDirMaxLength
+        val nm = Files.createDirectories(web.resolve("node_modules"))
+        Files.writeString(
+            nm.resolve(".modules.yaml"),
+            "virtualStoreDirMaxLength: 80\npackageManager: pnpm@9.0.0\n",
+            StandardCharsets.UTF_8,
+        )
+        // 第一次调用：报 pnpm 的"目录不兼容"并退出 1；第二次（重建后）成功
+        val counter = tmp.resolve("invoked-once")
+        val script = fakeDsh(
+            """
+            import { existsSync, writeFileSync } from 'node:fs';
+            if (!existsSync(${quote(counter.toString())})) {
+              writeFileSync(${quote(counter.toString())}, '1');
+              console.error('ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF  This modules directory was created using a different virtual-store-dir-max-length');
+              process.exit(1);
+            }
+            console.log('fake add ok');
+            """.trimIndent(),
+        )
+
+        val lines = CopyOnWriteArrayList<String>()
+        val outcome = DshPluginInstaller.run(
+            projectHome = home,
+            sharedRoot = shared,
+            nodeExe = nodeExe(),
+            dshBin = script,
+            action = "add",
+            spec = "dshmarket",
+            onLine = { lines.add(it) },
+        )
+
+        assertTrue(outcome.ok, "the retry after quarantining node_modules should succeed; output:\n${outcome.output}")
+        assertTrue(outcome.output.contains("fake add ok"), outcome.output)
+        assertTrue(outcome.output.contains("note:"), "the outcome should explain the rebuild:\n${outcome.output}")
+        assertTrue(
+            lines.any { it.contains("rebuilding") },
+            "the streamed output should say the directory is being rebuilt: $lines",
+        )
+        val quarantined = Files.list(web).use { s -> s.filter { it.fileName.toString().startsWith("node_modules.broken-") }.findFirst() }
+        assertTrue(quarantined.isPresent, "the mismatched node_modules must be moved aside, not deleted")
+        assertTrue(
+            Files.isRegularFile(quarantined.get().resolve(".modules.yaml")),
+            "the quarantined folder should keep its contents",
+        )
+    }
+
+    @Test
     fun `a failing add is not silently "fixed"`() {
         val shared = sharedRoot()
         presetPnpm(shared)

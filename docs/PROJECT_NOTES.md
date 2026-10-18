@@ -171,6 +171,26 @@ pnpm 要删除 `node_modules` 里的文件，而 Windows 上文件被进程占�
   `pnpm.overrides`）。新增 `DshPluginManifestEditorTest`（7 例）+ 两个端到端用例
   （假 dsh 失败 → 兜底成功且 manifest 正确；add 失败 **不**做兜底、manifest 回滚）。
 
+**第五轮：`ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF`（删了再装就失败）**。用户截图给出 pnpm 原始报错：
+```
+ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF This modules directory was created using a different
+virtual-store-dir-max-length value. Run "pnpm install" to recreate the modules directory.
+```
+含义：profile 里的 `node_modules` 是**别的 pnpm 配置/版本**建的（这里是 dsh 的 `healProfilesModuleFallback`
+或旧版本），pnpm 拒绝在它上面继续操作。**不是网络、不是权限、不是包名问题。**
+- 真实复现（本机，用户那套 pnpm 9.15.9 + 真实 dsh）：先 `pnpm add dshmarket --config.virtual-store-dir-max-length=50`
+  造出"不一致的 node_modules"，再 `dsh plugin --profile web add dsh-builtin-browser` → **同一条错误 + exit=1**；
+  改成 `… --config.virtual-store-dir-max-length=50` → **exit=0 安装成功**。
+- 修复（两级）：
+  1. **对齐**：安装/卸载前读 `node_modules/.modules.yaml` 的 `virtualStoreDirMaxLength`，用
+     `--config.virtual-store-dir-max-length=<v>` 传给 pnpm —— 能用现有目录就绝不重建（快、不重复下载）。
+  2. **自愈**：若仍以 `VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF` / `MODULES_BREAKING_CHANGE` / `UNEXPECTED_STORE` /
+     `MODULES_DIR_IS_OUTDATED` 失败，把 `node_modules` **改名隔离**为 `node_modules.broken-<时间戳>`
+     （同卷 rename，瞬时且可回滚），再不带 config 重跑一次；成功后提示隔离目录位置。其余错误
+     （`FETCH_404`/`EACCES` 等）**不触发**重建 —— 那只会白费一次下载。
+- 若隔离也失败（运行中的 dsh 占用 `node_modules`，Windows 不允许 rename/删除被占用的目录），仍明确报错并保留
+  manifest 备份；此时先「重启 Harness」再操作即可。
+
 ### v0.2.5 事故：`cleanLegacySharedRoot` 把共享 profile 根当遗留删掉（自伤，已修）
 
 **症状（用户实测）**：点设置页「刷新」后一直停在 "Reading the profile…"，计时一路涨到 35s+；放开后插件列表
@@ -760,7 +780,7 @@ x64 对应 `*-darwin-x64`）。
 | 集成冒烟 | DshBootstrapSmokeTest(真实 dsh 启动 + workspace 注册断言) / DshMcpBridgeSmokeTest(mock bridge + MCP tools/list 6 工具 + failOnStartupError 严格启动) / WorkspaceInitializerSmokeTest(切换项目工作区顺序) / **LegacySessionMigratorSmokeTest(v0.1.3-dev：zstd session 迁移后 workspace.json 自动挂接)** | 需 `DSH_IDEA_RUNTIME`，否则跳过 |
 
 - 冒烟测试注意：临时 DSH_HOME 内 dsh 自愈 junction 指向 runtime → **tearDown 必须先 unlinkJunctions 再让 `@TempDir` 清理**，否则清空 runtime（见 §4）。
-- 测试计数：**249 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 249 为准**。
+- 测试计数：**253 个**（截至 v0.2.5，**全部通过、0 失败**；沙箱下需完整权限，否则 Gradle native 服务初始化失败）。上表括号内数字为该测试类引入/记录版本的用例数（记录值，如 v0.2.0 的 10/6/7），后续版本新增用例未逐类复列——类覆盖以上表为准，**当前总数以 253 为准**。
 
 ---
 

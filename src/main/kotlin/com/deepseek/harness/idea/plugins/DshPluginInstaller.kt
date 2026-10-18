@@ -169,6 +169,35 @@ internal object DshPluginInstaller {
         return java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS").format(t)
     }
 
+    /**
+     * 读取现有 `node_modules` 的 `virtualStoreDirMaxLength`（pnpm 写在 `.modules.yaml` 里）。
+     *
+     * **为什么必须读**：`node_modules` 可能是被**别的** pnpm 配置/版本（例如 dsh 的自愈逻辑）创建的，
+     * 此时 pnpm 会直接拒绝操作：`ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF`（v0.2.5 用户实测）。
+     * 读到后通过 `--config.virtual-store-dir-max-length=` 让本次 pnpm 用**同一个值**，避免无谓重建。
+     */
+    fun virtualStoreMaxLength(modulesYaml: String?): Int? {
+        if (modulesYaml.isNullOrBlank()) return null
+        return Regex("(?m)^\\s*virtualStoreDirMaxLength:\\s*(\\d+)\\s*$")
+            .find(modulesYaml)?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    /**
+     * 该 pnpm 失败是否属于"`node_modules` 状态与当前 pnpm 不兼容"（可以做**隔离重建**自愈）。
+     *
+     * 典型是 `ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF`；另外几个同族错误同样属于目录状态不一致，
+     * 重建一次即可。**不要**把网络/权限/包不存在也算进来 —— 那重建只会白费一次下载。
+     */
+    fun isSelfHealableModulesError(output: String): Boolean {
+        val markers = listOf(
+            "ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF",
+            "ERR_PNPM_MODULES_BREAKING_CHANGE",
+            "ERR_PNPM_UNEXPECTED_STORE",
+            "ERR_PNPM_MODULES_DIR_IS_OUTDATED",
+        )
+        return markers.any { output.contains(it) }
+    }
+
     /** 读取某项目的 profile manifest（经 `<项目 DSH_HOME>/profiles/web`，共享开启时即共享目录）。 */
     fun readProfile(projectHome: Path): DshProfileManifest.Profile {
         val file = projectHome.resolve("profiles").resolve(DshProfileManifest.PROFILE_NAME).resolve(DshProfileManifest.FILE_NAME)
@@ -243,15 +272,49 @@ internal object DshPluginInstaller {
             val backup = backupProfile(profileDir, sharedRoot)
             val quoteSpec = Platform.current().os == Platform.Os.WINDOWS &&
                 spec != null && DshProfileManifest.needsWindowsQuote(spec)
-            val cmd = listOf(nodeExe.toString(), dshBin.toString()) + dshArgs(action, spec, quoteSpec)
+            // 先对齐现有 node_modules 的 virtual-store-dir-max-length：它可能是 dsh 自愈/旧 pnpm 创建的，
+            // 与我们的 pnpm 默认值不同 → pnpm 会直接拒绝（ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF）。
+            val alignMaxLength = virtualStoreMaxLength(
+                runCatching {
+                    Files.readString(
+                        profileDir.resolve("node_modules/.modules.yaml"),
+                        StandardCharsets.UTF_8,
+                    )
+                }.getOrNull(),
+            )
+            fun command(maxLength: Int?): List<String> {
+                val args = dshArgs(action, spec, quoteSpec).toMutableList()
+                if (maxLength != null) args.add("--config.virtual-store-dir-max-length=$maxLength")
+                return listOf(nodeExe.toString(), dshBin.toString()) + args
+            }
             val env = withShimPath(System.getenv(), pnpm).toMutableMap().apply {
                 put("DSH_HOME", projectHome.toString())
                 // node 自身也在 PATH 里：pnpm 执行生命周期脚本时会用到
                 put("PATH", nodeExe.parent.toString() + File.pathSeparator + getValue("PATH"))
             }
             progress(Phase.RUNNING)
-            LOG.info("dsh plugin $action: exec ${cmd.joinToString(" ")}")
-            val (code, output) = exec(cmd, profileDir, env, onLine, cancelled)
+            LOG.info(
+                "dsh plugin $action: exec ${command(alignMaxLength).joinToString(" ")}" +
+                    if (alignMaxLength != null) " (aligned virtual-store-dir-max-length=$alignMaxLength)" else "",
+            )
+            var (code, output) = exec(command(alignMaxLength), profileDir, env, onLine, cancelled)
+
+            // 自愈：node_modules 与当前 pnpm 不兼容时（目录是用别的 virtual-store 配置建的），
+            // 把整个 node_modules 隔离改名后再跑一次 —— pnpm 会按 manifest 重建。
+            var selfHealed: Path? = null
+            if (code != 0 && isSelfHealableModulesError(output)) {
+                selfHealed = quarantineNodeModules(profileDir)
+                if (selfHealed != null) {
+                    LOG.info("dsh plugin $action: quarantined a mismatched node_modules -> $selfHealed; retrying once")
+                    runCatching { onLine("note: node_modules was created by a different pnpm configuration; rebuilding it") }
+                    val retry = exec(command(null), profileDir, env, onLine, cancelled)
+                    code = retry.first
+                    output = output + "\n\n" + retry.second
+                } else {
+                    LOG.warn("dsh plugin $action: could not quarantine node_modules (files are in use?)")
+                }
+            }
+
             if (code != 0) {
                 // 卸载的兜底：运行中的 dsh 会占用 node_modules，pnpm 删不掉（实测稳定 exit=1）。
                 // dsh 只按 manifest 的 `dsh.profile.bundles` 决定加载什么，所以从 manifest 移除声明
@@ -290,7 +353,12 @@ internal object DshPluginInstaller {
                 "dsh plugin $action ok for $profileDir: bundles=${after.bundles.size} " +
                     "plugins=${after.plugins} deps=${after.dependencies.size} backup=$backup",
             )
-            return outcome(true, output, after)
+            val note = selfHealed?.let {
+                "\nnote: the previous node_modules was created by a different pnpm configuration and could not be " +
+                    "reused; it was quarantined at $it and rebuilt. You can delete that folder once the harness " +
+                    "restarts cleanly."
+            }.orEmpty()
+            return outcome(true, output + note, after)
         } catch (e: Exception) {
             LOG.warn("dsh plugin $action crashed for $profileDir", e)
             return outcome(false, "", readProfile(projectHome), Failure.ERROR, e.message ?: e.toString())
@@ -387,6 +455,24 @@ internal object DshPluginInstaller {
             }
         }
         return dir
+    }
+
+    /**
+     * 把与当前 pnpm 不兼容的 `node_modules` **改名隔离**（不是删除：同卷 rename 瞬时，且失败可回滚）。
+     *
+     * @return 隔离后的路径；失败（例如被运行中的 dsh 占用）返回 `null`。
+     */
+    private fun quarantineNodeModules(profileDir: Path): Path? {
+        val nodeModules = profileDir.resolve("node_modules")
+        if (!Files.exists(nodeModules, java.nio.file.LinkOption.NOFOLLOW_LINKS)) return null
+        val dest = profileDir.resolve("node_modules.broken-${stamp(System.currentTimeMillis())}")
+        return try {
+            Files.move(nodeModules, dest)
+            dest
+        } catch (e: Exception) {
+            LOG.warn("failed to move $nodeModules aside", e)
+            null
+        }
     }
 
     /**

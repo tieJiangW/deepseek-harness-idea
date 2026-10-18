@@ -140,16 +140,22 @@
             the current phase (checking the runtime → preparing pnpm → installing), streamed pnpm output, a
             "still running" hint when the child is silent, a Cancel button, and an explicit green ✓ / red ✗ result
             (with the time taken) plus an IDE notification — so you always know whether it worked.</li>
-            <li><b>Fixes for this release.</b> Uninstalling no longer hangs or fails while the harness is running: progress
-            updates from the background worker now use <code>ModalityState.any()</code> (inside the modal Settings dialog
-            the default modality deferred them until the dialog closed, so a command that finished in one second looked
-            like a 60-second freeze), and when <code>pnpm remove</code> cannot delete files held open by the running
-            harness (exit code 1), the uninstall falls back to removing the package from the profile manifest — dsh loads
-            what the manifest declares, so the plugin really is uninstalled and stops loading after a restart.
-            Install/remove/repair also moved to the plugin's own worker thread, because right after a restart the IDE's
-            shared pool can be saturated by indexing and our task would sit queued with no error and no log. Earlier in
-            this release cycle a development build could also delete the shared profile root through the legacy-cleanup
-            step (wiping the installed plugin list); that directory is no longer cleaned and a regression test guards it.</li>
+            <li><b>Fixes for this release.</b> Reinstalling after an uninstall no longer fails with
+            <code>ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF</code>: the profile's <code>node_modules</code> had been
+            created by a different pnpm configuration, so the installer now reads
+            <code>virtualStoreDirMaxLength</code> from <code>node_modules/.modules.yaml</code> and passes the same value
+            to pnpm, and if pnpm still reports a mismatched directory it renames the old one to
+            <code>node_modules.broken-&lt;timestamp&gt;</code> and retries once. Uninstalling no longer hangs or fails
+            while the harness is running: progress updates from the background worker now use
+            <code>ModalityState.any()</code> (inside the modal Settings dialog the default modality deferred them until
+            the dialog closed, so a command that finished in one second looked like a 60-second freeze), and when
+            <code>pnpm remove</code> cannot delete files held open by the running harness (exit code 1), the uninstall
+            falls back to removing the package from the profile manifest — dsh loads what the manifest declares, so the
+            plugin really is uninstalled and stops loading after a restart. Install/remove/repair also moved to the
+            plugin's own worker thread, because right after a restart the IDE's shared pool can be saturated by indexing
+            and our task would sit queued with no error and no log. Earlier in this release cycle a development build
+            could also delete the shared profile root through the legacy-cleanup step (wiping the installed plugin
+            list); that directory is no longer cleaned and a regression test guards it.</li>
             <li><b>插件装一次，所有项目生效。</b>每个项目的 <code>profiles/</code> 目录现在链接到统一的共享 profile 根，
             因此在一个项目中安装的插件对所有项目可见；会话、工作区与附件仍留在各自 DSH_HOME，隔离不变。可在
             <i>设置 → Tools → DeepSeek Harness</i> 中用「跨项目共享 dsh 插件包」开关控制（默认开启）；既有的项目级
@@ -163,10 +169,14 @@
             <li><b>安装过程看得见。</b>不定进度条 + 每秒刷新的用时 + 当前阶段（检查运行时 → 准备 pnpm → 正在安装）+
             实时 pnpm 输出 + 长时间无输出时"仍在运行"提示 + 「取消」按钮，结束给出绿色 ✓ / 红色 ✗（含用时）并弹
             IDE 通知 —— 不再无从判断是否装成功。</li>
-            <li><b>本版修复。</b>卸载不再因为 Harness 在运行而卡住或失败：后台线程回报进度改用
-            <code>ModalityState.any()</code>（模态的设置对话框里，默认模态会把更新推迟到对话框关闭，于是 1 秒就完成的命令
-            看起来卡了 60 秒）；当 <code>pnpm remove</code> 因文件被运行中的 Harness 占用而失败（exit code 1）时，
-            卸载会兜底改为从 profile manifest 移除声明 —— dsh 按 manifest 加载，因此插件确实被卸载、重启后不再加载。
+            <li><b>本版修复。</b>卸载后重新安装不再报 <code>ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF</code>：profile 的
+            <code>node_modules</code> 曾被另一套 pnpm 配置创建，现在安装/卸载前会读
+            <code>node_modules/.modules.yaml</code> 的 <code>virtualStoreDirMaxLength</code> 并把同值传给 pnpm；
+            若 pnpm 仍报目录不一致，则把旧目录改名为 <code>node_modules.broken-&lt;时间戳&gt;</code> 并自动重试一次。
+            卸载也不再因为 Harness 在运行而卡住或失败：后台线程回报进度改用 <code>ModalityState.any()</code>
+            （模态的设置对话框里，默认模态会把更新推迟到对话框关闭，于是 1 秒就完成的命令看起来卡了 60 秒）；
+            当 <code>pnpm remove</code> 因文件被运行中的 Harness 占用而失败（exit code 1）时，卸载会兜底改为从
+            profile manifest 移除声明 —— dsh 按 manifest 加载，因此插件确实被卸载、重启后不再加载。
             安装/卸载/修复也改到插件自建的专用线程，避免刚重启 IDE 时公共线程池被索引占满、任务排队且无错误无日志。
             本版开发过程中的构建还曾因遗留清理误删共享 profile 根（清空已装插件列表），该目录已不再被清理并由回归测试守护。</li>
         </ul>
