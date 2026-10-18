@@ -269,6 +269,10 @@ node scripts/secret-audit.mjs
 
 ## 7. 已知注意事项
 
+- **v0.2.6 实操记录（2026-10-18）**：`main` → `8a52dee`（常规 `git push` 成功）、tag `v0.2.6` → `8a52dee`；
+  GitHub Release id **416496528**（11 资产，URL `…/releases/tag/v0.2.6`）；**Marketplace 本次未上传**（用户决定）。
+  CI（`build-release.yml`）重建并覆盖了 win-x64 / macos-arm64 / linux-x64 的 zip+sha256 与插件 zip；
+  `macos-x64` / `linux-arm64` 为本地交叉构建。一致性用 GitHub asset `digest` 与 `.sha256` 侧车比对，5/5 一致。
 - **v0.2.5 一键脚本**：`node scripts/release-v0.2.5.mjs`（凭据只从 `GITHUB_PAT` / `MARKETPLACE_TOKEN` 读；
   缺哪项跳过哪段）。它按顺序做：push main → push tag（`--force` 幂等）→ 创建/复用 Release → **PATCH 正文**
   （防 CI 的 `generate_release_notes` 覆盖）→ 上传 11 个资产（同名先删）→ 打印 tag 与 main 指向。
@@ -328,18 +332,28 @@ node scripts/secret-audit.mjs
 - API 推送不会更新本地 `origin/main` 引用（本地对象库里没有 API 生成的 commit 对象）；下次在有网络的环境
   `git fetch` 即可对齐，内容与本地提交一致。
 
-### 8.1 v0.2.6 发布记录（2026-10-18，本通道实测）
+### 8.1 v0.2.6 发布记录（2026-10-18，实测）
 
 | 项 | 结果 |
 | --- | --- |
-| 连通性 | `api.github.com` → 200；`uploads.github.com` → 302；**`github.com` → 000**（`git push` / `git fetch` 均不可用） |
-| 代码推送 | `scripts/release-v0.2.6.mjs` 先试 `git push`（失败），随后**自动**走 Git Data API：`POST /git/blobs` → `POST /git/trees`（能 diff 时带 `base_tree`，否则整树快照）→ `POST /git/commits` → `PATCH /git/refs/heads/main`；再 `POST /git/refs` 建 tag |
-| Release 与资产 | `POST /releases` + `POST uploads.github.com/.../assets?name=…`，共 **11 个资产**：插件 zip + 5 平台 `runtime-<os>-<arch>.zip` + 5 个 `.sha256` |
+| 连通性 | 发版前 `git ls-remote` 失败（`github.com` → 000）、`api.github.com` → 200、`uploads.github.com` → 302；**实际执行时带 token 的 `git push` 却成功了** —— 主站是间歇性可用，不能只看一次探测结果 |
+| 代码推送 | `scripts/release-v0.2.6.mjs` 先试 `git push`：本次 **exit=0**（`55b8e38..8a52dee`），因此 §8 的 Git Data API 回退**未触发**（分支保留，供真不通时使用） |
+| tag | `POST /git/refs` 建 `v0.2.6` → `8a52dee`；**tag 触发 `build-release.yml`** |
+| Release 与资产 | Release id **416496528**，11 资产：插件 zip + 5 平台 zip + 5 个 `.sha256` |
+| CI 覆盖 | CI 重建并覆盖 **win-x64 / macos-arm64 / linux-x64 的 zip 与 `.sha256`（成对）**，以及**瘦身插件 zip**；`macos-x64` / `linux-arm64` 保持本地交叉构建件 |
+| 一致性校验 | 用 GitHub asset `digest`（GitHub 自己算的 SHA-256）与上传的 `.sha256` 侧车逐平台比对 → **5/5 全部一致**（比"下载 1.3GB 再算哈希"可靠且便宜） |
+| Release 正文 | 我们的中英双语正文**被保留**，CI 只追加了 `**Full Changelog**: …/compare/v0.2.5...v0.2.6`（无需再 PATCH 回去） |
 | Marketplace | **本版有意不上传**（用户决定）；脚本在 `MARKETPLACE_TOKEN` 未设置时自动跳过该段 |
 | 凭据 | 只从 `$env:GITHUB_PAT` 读；脚本对 `git` 输出做了脱敏（`gh?_***` / `x-access-token:***@`），避免报错时把 token 打进控制台或日志 |
 
 **新增脚本**：`scripts/release-v0.2.6.mjs`（= `release-v0.2.5.mjs` + 版本号 + §8 API 推送回退 + 输出脱敏）。
 后续版本沿用同样模式：复制上一版脚本 → 改 `TAG`/`PLUGIN_ZIP`/`NOTES` → 运行。
 
-**踩坑**：本地 `build/` 里同时放着运行时树与 zip 产物，发布前**不要**跑 `gradle clean`（会把正在被 IDE 使用的
-运行时树一起删掉，见 `docs/README.md` 的环境注意事项）。
+**踩坑（本次新增）**：
+1. 本地 `build/` 里同时放着运行时树与 zip 产物，发布前**不要**跑 `gradle clean`（会把正在被 IDE 使用的
+   运行时树一起删掉，见 `docs/README.md` 的环境注意事项）。
+2. **不要只凭一次连通性探测判断"必须走 API"**：本次 `ls-remote` 失败但 `git push` 成功；脚本"先试 git push、
+   失败再回退"的设计正好覆盖这种间歇性。
+3. **自己上传与 CI 上传会打架**：CI 在 tag 后几秒内就开始替换同名资产，脚本的"先删再传"会撞上
+   `422 already_exists` 或 `404`（实测 macos-arm64 zip 一次 404）。正确做法是**先传本地、等 CI 结束、再跑一次脚本对账**
+   （幂等），或用本次的 `digest` 比对法确认最终成对。
