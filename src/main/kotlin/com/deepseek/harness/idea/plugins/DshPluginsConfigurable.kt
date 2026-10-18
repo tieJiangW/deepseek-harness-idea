@@ -67,6 +67,31 @@ class DshPluginsConfigurable : SearchableConfigurable {
 
     private val LOG = com.intellij.openapi.diagnostic.Logger.getInstance(DshPluginsConfigurable::class.java)
 
+    /**
+     * 专用后台线程（单线程、daemon），惰性创建、可自愈。
+     *
+     * 装/卸/修复都跑在这里，而不是 `ApplicationManager.executeOnPooledThread`：后者在用户机器上
+     * 出现过"任务提交后既不执行也不报错"（零日志、零输出、零心跳），既无法自证也无法绕过。
+     * 自建线程后，日志里 `install: submitting to worker` / `install: worker started` 能明确区分
+     * "没被调度"与"卡在某一步"。
+     *
+     * **不要 shutdown 它**：平台会复用同一个 Configurable 实例（关闭再打开设置页会走到
+     * `disposeUIResources` 后再次 `createComponent`）；若此时已 shutdown，`execute` 会抛
+     * `RejectedExecutionException`，界面就会永久停在"进行中"——正是我们这次要根除的症状。
+     */
+    @Volatile
+    private var workerRef: java.util.concurrent.ExecutorService? = null
+
+    private fun worker(): java.util.concurrent.ExecutorService {
+        val current = workerRef
+        if (current != null && !current.isShutdown) return current
+        val fresh = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "dsh-plugins-worker").apply { isDaemon = true }
+        }
+        workerRef = fresh
+        return fresh
+    }
+
     /** 当前选中的项目根路径（空串 = 没有打开的项目，落到 `default` DSH_HOME）。 */
     private var selectedProjectPath: String = ""
 
@@ -262,8 +287,13 @@ class DshPluginsConfigurable : SearchableConfigurable {
         stopTicker()
         flushTimer?.stop()
         flushTimer = null
+        slowHintTimer?.stop()
+        slowHintTimer = null
+        // 关闭设置页时中止仍在跑的安装/卸载（取消信号会让子进程被杀并回滚 manifest）。
         if (operationRunning) cancelRequested.set(true)
         operationRunning = false
+        // 注意：**不 shutdown worker**（见 worker 字段注释：平台会复用本实例，shutdown 会让下次
+        // 提交被拒绝，界面就永久停在"进行中"）。它是单线程 daemon，空闲时不消耗资源。
     }
 
     // ---- 展示辅助 ----
@@ -444,7 +474,7 @@ class DshPluginsConfigurable : SearchableConfigurable {
 
     /** 后台修复 profile 目录（首次启用共享 / 链接缺失），成功后重新读一次。 */
     private fun repairProfileAsync(seq: Long) {
-        ApplicationManager.getApplication().executeOnPooledThread {
+        onWorker("repair") {
             val startedAt = System.currentTimeMillis()
             val home = runCatching { homeManager().ensureProfileHome(selectedProjectPath) }.getOrNull()
             LOG.info("repair($selectedProjectPath): ${System.currentTimeMillis() - startedAt}ms ready=${home != null}")
@@ -458,6 +488,36 @@ class DshPluginsConfigurable : SearchableConfigurable {
                     return@invokeLater
                 }
                 refreshAsync() // 重读（此时一定能读到 manifest）
+            }
+        }
+    }
+
+    /**
+     * 在**插件自建的单线程守护线程**上执行后台工作。
+     *
+     * **为什么不用 `ApplicationManager.executeOnPooledThread`**：v0.2.5 用户实测两次出现
+     * "后台任务提交后既不执行也不报错"（刷新读 54s、安装 149s 无任何输出与心跳），而同一批
+     * 文件操作单独测都是毫秒级。提交到 IDE 线程池会让这类问题既无法自证也无法绕过；
+     * 自建一个专用线程（串行、daemon、名字可辨识）后，日志能明确证明任务是否执行、走到哪一步。
+     */
+    private fun onWorker(tag: String, block: () -> Unit) {
+        LOG.info("$tag: submitting to worker")
+        runCatching {
+            worker().execute {
+                LOG.info("$tag: worker started")
+                try {
+                    block()
+                } catch (e: Throwable) {
+                    LOG.warn("$tag: worker failed", e)
+                    throw e
+                }
+            }
+        }.onFailure { e ->
+            // 提交失败也要让界面有结论，绝不停在"进行中"
+            LOG.warn("$tag: could not submit to the worker", e)
+            ApplicationManager.getApplication().invokeLater {
+                setBusy(false)
+                setStatus(DshBundle.message("plugins.error.generic", e.toString()), errorColor())
             }
         }
     }
@@ -531,27 +591,37 @@ class DshPluginsConfigurable : SearchableConfigurable {
         },
     )
 
-    /** 统一的安装/卸载流程：后台跑命令（实时输出）→ 结果写入状态行与输出区。 */
+    /** 统一的安装/卸载流程：专用线程跑命令（实时输出）→ 结果写入状态行与输出区。 */
     private fun operate(action: String, spec: String) {
         if (operationRunning) return
         clearOutput()
         val verb = if (action == "add") "plugins.phase.installing" else "plugins.phase.removing"
         setBusy(true, DshBundle.message(verb, spec), cancellable = true)
         appendOutputLine("== " + DshBundle.message(verb, spec))
+        // 初始状态就写明"下一步在准备 profile"：若后台迟迟没有进展，用户能看出卡在这一步，
+        // 而不是盯着一个看起来像"已经开始 pnpm"的文案（v0.2.5 用户实测 149s 卡在此处）。
+        setPhase(DshBundle.message("plugins.phase.checking"))
 
-        ApplicationManager.getApplication().executeOnPooledThread {
+        onWorker("install:$action:$spec") {
             fun post(block: () -> Unit) = ApplicationManager.getApplication().invokeLater(block)
             val outcome = runCatching {
                 // 只确保 profile 目录/链接就绪（轻量）；重量级初始化留给 dsh 启动时的 ensureHome。
                 // null = 锁超时（另一条路径正忙），此时**不能**继续：否则 installer 会 `createDirectories`
                 // 出一个项目独立 profile，悄悄绕过共享。
+                val profileStartedAt = System.currentTimeMillis()
                 val home = homeManager().ensureProfileHome(selectedProjectPath)
-                    ?: return@runCatching DshPluginInstaller.Outcome(
+                LOG.info(
+                    "install($spec): profile ready=${home != null} in ${System.currentTimeMillis() - profileStartedAt}ms",
+                )
+                if (home == null) {
+                    return@runCatching DshPluginInstaller.Outcome(
                         ok = false,
                         output = "",
                         failure = DshPluginInstaller.Failure.PROFILE_BUSY,
                         detail = "profile is being initialized by another operation",
                     )
+                }
+                LOG.info("install($spec): invoking the installer")
                 DshPluginInstaller.run(
                     projectHome = home,
                     sharedRoot = homeManager().sharedConfigRoot(),
@@ -559,20 +629,19 @@ class DshPluginsConfigurable : SearchableConfigurable {
                     dshBin = homeManager().dshBin(),
                     action = action,
                     spec = spec,
-                    onPhase = { phase ->
-                        post { if (operationRunning) setPhase(phaseTextOf(phase, action, spec)) }
-                    },
+                    onPhase = { phase -> post { setPhase(phaseTextOf(phase, action, spec)) } },
                     onLine = { line ->
                         // 心跳只更新时间戳（证明子进程还活着），不写进输出区
                         if (line == DshPluginInstaller.HEARTBEAT) {
                             lastActivityAt = System.currentTimeMillis()
                         } else {
-                            post { if (operationRunning) appendOutputLine(line) }
+                            post { appendOutputLine(line) }
                         }
                     },
                     cancelled = { cancelRequested.get() },
                 )
             }.getOrElse { e ->
+                LOG.warn("install($spec) crashed in the worker", e)
                 DshPluginInstaller.Outcome(false, "", failure = DshPluginInstaller.Failure.ERROR, detail = e.message)
             }
 

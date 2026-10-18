@@ -197,6 +197,31 @@ src/main/resources/
 - 教训：**任何"串行化 + 可能卡住的外部进程"组合都要给等待设上限**；"没有日志"本身就是证据 —— 说明卡在
   第一个日志点之前，先怀疑锁与外部进程 IO，而不是继续优化文件遍历。
 
+**第三轮：装 `dshmarket` 卡 149s（"no output for 149s"、连心跳都没有）**。截图同时给出两个决定性事实：
+状态还停在 `operate` 的**初始文案**（不是 `onPhase(CHECKING)`），输出区只有 UI 自己写的那行 —— 说明
+`DshPluginInstaller.run()` **一次都没被调用**，卡在它前面的 `ensureProfileHome`；而"没有心跳"进一步说明
+`exec` 没启动。日志里同样一片空白。
+
+**根因（高度吻合时序）**：安装/修复当时跑在 `ApplicationManager.executeOnPooledThread` 上。IDE 的公共后台池是
+**无界队列**的 `ThreadPoolExecutor` —— 刚重启 IDE 时（用户 16:05 重启，16:06 点安装）索引/扫描会把线程占满，
+我们的任务就**排进队列、既不执行也不报错**（不抛 `RejectedExecutionException`，因为队列无界），
+用户侧就是"点了没反应、一直读秒"。这也解释了为什么上一版把**刷新改成 EDT 直读后刷新立即出结果**，
+而同一轮里安装（仍走池）继续卡。
+
+**修复**：
+1. 装/卸/修复改到**插件自建的单线程 daemon 线程**（`dsh-plugins-worker`），彻底不依赖 IDE 池；
+   日志里 `install: submitting to worker` / `install: worker started` 能区分"没被调度"与"卡在某步"。
+2. **不 shutdown 这个 worker**：平台会复用同一个 Configurable 实例（关闭再打开设置页会先
+   `disposeUIResources` 再 `createComponent`），若已 shutdown，`execute` 会抛
+   `RejectedExecutionException` → 界面永久停在"进行中"。改为惰性创建 + 已 shutdown 就重建，
+   并在提交失败时给出可读错误（绝不停在"进行中"）。
+3. `operate` 一进来就把阶段设成"正在检查运行时…"，避免文案看起来像"pnpm 已经开始"。
+4. `DshPluginInstaller` 的安装锁从 `tryLock(900s)` 改成 `tryLock(5s)`，超时明确报
+   `Failure.PROFILE_BUSY`（原来会静默等 15 分钟）。
+5. 诊断日志加密：`ensureProfileHome: enter / lock acquired in Nms / Nms shared=…`、
+   `ensureProfiles: state=…`、`install(...): profile ready=… in Nms` / `invoking the installer` /
+   `dsh plugin add: profile=… / pnpm ready at … / exec …`。下次若再卡，日志最后一行就是卡点。
+
 ### v0.2.5 dsh 插件包共享（"装一次、多项目生效"：全链路冒烟实测）
 
 **问题**：dsh 从 `$DSH_HOME/profiles/<name>` 解析 profile（`dsh-app-boot.resolveProfileDir(name, home)` =

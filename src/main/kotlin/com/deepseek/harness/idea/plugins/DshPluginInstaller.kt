@@ -223,10 +223,14 @@ internal object DshPluginInstaller {
         if (!Files.isRegularFile(nodeExe) || !Files.isRegularFile(dshBin)) {
             return outcome(false, "", before, Failure.NO_RUNTIME, "missing runtime: node=$nodeExe dsh=$dshBin")
         }
-        if (!lock.tryLock(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-            return outcome(false, "", before, Failure.COMMAND_FAILED, "another plugin operation is still running")
+        // 安装锁只等 5s：超过就说明另一个装/卸还在跑（或上次异常残留），必须**明确报错**而不是
+        // 静默等 900s —— v0.2.5 用户实测就是"界面一直读秒、什么也没有"。
+        if (!lock.tryLock(5, TimeUnit.SECONDS)) {
+            LOG.warn("dsh plugin $action: another plugin operation is still holding the install lock")
+            return outcome(false, "", before, Failure.PROFILE_BUSY, "another plugin operation is still running")
         }
         try {
+            LOG.info("dsh plugin $action: profile=$profileDir")
             Files.createDirectories(profileDir)
             val pnpm = try {
                 ensurePnpm(sharedRoot, nodeExe, onLine) { progress(Phase.PREPARING_PNPM) }
@@ -234,6 +238,7 @@ internal object DshPluginInstaller {
                 LOG.warn("failed to prepare the private pnpm under $sharedRoot", e)
                 return outcome(false, "", before, Failure.PNPM_SETUP_FAILED, e.message)
             }
+            LOG.info("dsh plugin $action: pnpm ready at $pnpm")
 
             val backup = backupProfile(profileDir, sharedRoot)
             val quoteSpec = Platform.current().os == Platform.Os.WINDOWS &&
@@ -245,6 +250,7 @@ internal object DshPluginInstaller {
                 put("PATH", nodeExe.parent.toString() + File.pathSeparator + getValue("PATH"))
             }
             progress(Phase.RUNNING)
+            LOG.info("dsh plugin $action: exec ${cmd.joinToString(" ")}")
             val (code, output) = exec(cmd, profileDir, env, onLine, cancelled)
             if (code != 0) {
                 restoreProfile(backup, profileDir)

@@ -448,10 +448,14 @@ class DshHomeManager : Disposable {
     fun ensureProfileHome(projectPath: String, lockTimeoutSeconds: Long = 10): Path? {
         val home = homeDir(projectPath)
         val startedAt = System.currentTimeMillis()
+        // 日志点刻意放在**拿锁之前**：万一以后又出现"无声卡住"，日志能立刻区分
+        // "还没进入本方法/卡在 homeDir" 与 "进方法了但拿不到锁"。
+        LOG.info("ensureProfileHome($projectPath): enter")
         if (!profileHomeLock.tryLock(lockTimeoutSeconds, TimeUnit.SECONDS)) {
             LOG.warn("ensureProfileHome($projectPath): profile lock busy after ${lockTimeoutSeconds}s; giving up")
             return null
         }
+        LOG.info("ensureProfileHome($projectPath): lock acquired in ${System.currentTimeMillis() - startedAt}ms")
         try {
             Files.createDirectories(home)
             ensureProfiles(home, projectPath)
@@ -495,7 +499,9 @@ class DshHomeManager : Disposable {
                 return
             }
             Files.createDirectories(shared)
-            when (SharedProfilesLink.state(project, shared)) {
+            val state = SharedProfilesLink.state(project, shared)
+            LOG.info("ensureProfiles($projectPath): state=$state")
+            when (state) {
                 SharedProfilesLink.State.CORRECT_LINK -> Unit
                 // 共享根的 profile 骨架由本方法返回后的 writeIfAbsent 播种（首个项目即建好）
                 SharedProfilesLink.State.ABSENT -> createProfilesLink(project, shared)
