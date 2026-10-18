@@ -25,9 +25,11 @@
 - **v0.2.4 主题（已完成）**：dsh 配置共享化（修复"新模型/API Key/预设重启后消失"）+ Lexical composer 注入修复
   （右键发送选中代码 / DSH 一键解释已恢复，真实页面 CDP 实测通过）
 - **平台**：Windows x64、macOS（arm64 / x64）、Linux（x64 / arm64）五平台运行时资产
-- **发布状态（v0.2.5）**：JetBrains Marketplace **update 1197216** 已上传（`version=0.2.5`、`approve=false` 待审，兼容 241.0–262.*）；
-  GitHub Release **待推送**（本地已提交 `395f425` + tag `v0.2.5`，用 `scripts/release-v0.2.5.mjs` 补发）。
-  v0.2.4：GitHub Release id 391244240（11 资产）+ Marketplace update 1174317
+- **发布状态（v0.2.5，2026-10-18）**：
+  GitHub Release [`v0.2.5`](https://github.com/tieJiangW/deepseek-harness-idea/releases/tag/v0.2.5)（id **416360059**，
+  **11 个资产**：插件 zip + 5 平台 runtime 及 `.sha256`；tag `v0.2.5 → 395f425`，main `201f4c4`；正文为中英双语）；
+  JetBrains Marketplace **update 1197216**（`version=0.2.5`、`approve=false` 待审，兼容 241.0–262.*）
+- **v0.2.4**：GitHub Release id 391244240（11 资产）+ Marketplace update 1174317
 - **macOS 验证**：v0.2.4 已在 **macOS（Apple Silicon）** 由用户完成端到端实测（安装、启动、对话、MCP 工具链）
 - **⚠️ 本机环境注意**：`github.com:443` 不稳定（`api.github.com`、`uploads.github.com`、`plugins.jetbrains.com` 可达）；
   `tooling/runtime-dev` 必须与 `DshHomeManager.DSH_VERSION` 一致（已对齐 0.1.5-rc.2，旧 0.1.1 树保存在
@@ -59,7 +61,7 @@
 
 | 日期 | 版本 | 变更内容 |
 |---|---|---|
-| 2026-10-18 | v0.2.5 发布（Marketplace 完成，GitHub 待推） | JetBrains Marketplace **update 1197216** 已上传：`version=0.2.5`、`approve=false`（待审）、`since=241.0 / until=262.*`、包大小 2,055,103 B、更新说明取自 jar 内 `<change-notes>` 首条（中英）。GitHub Release 尚未推送：本地已提交 `395f425` 并打 tag `v0.2.5`，`scripts/release-v0.2.5.mjs` 可幂等补发（11 个资产：插件 zip + 5 平台 runtime 及 `.sha256`）。**凭据教训**：此前泄露在会话里的 GitHub PAT 已被服务端撤销（`GET /user` → 401），旧 Marketplace token 亦失效（上传 → 403 invalid），必须重新签发；新 token 只从环境变量传入，绝不入库。 |
+| 2026-10-18 | v0.2.5 发布 | **GitHub Release [`v0.2.5`](https://github.com/tieJiangW/deepseek-harness-idea/releases/tag/v0.2.5)**（id **416360059**，11 个资产：插件 zip + 5 平台 runtime 及 `.sha256`；tag → `395f425`，main → `201f4c4`；正文中英双语）；**JetBrains Marketplace update 1197216**（`version=0.2.5`、`approve=false` 待审、241.0–262.*、2,055,103 B）。**踩坑**：tag 触发的 CI（`Build & Release v0.2.5`）会重建并上传其中 3 个平台的 runtime zip 与 `.sha256`，本地补传脚本曾只按大小跳过 sha256，导致「zip 是本地构建、sha256 是 CI 构建」的**错配**（字节数相同、哈希不同 → 用户首次下载校验必失败）；已重传 3 个平台（win-x64 / macos-arm64 / linux-x64）的 zip+sha256 并复核 5 平台全部配对。`scripts/release-v0.2.5.mjs` 已改为**以远端 `.sha256` 内容为准成对同步**，并在结束时复核配对。**凭据**：旧 GitHub PAT 已被服务端撤销（401）、旧 Marketplace token 失效（403），均已重新签发；新 token 只从环境变量传入，用完请轮换。 |
 | 2026-09-18 | v0.2.4 发布 | **v0.2.4 已发布**：GitHub Release [`v0.2.4`](https://github.com/tieJiangW/deepseek-harness-idea/releases/tag/v0.2.4)（id 391244240，11 个资产：插件 zip + win-x64 / macos-arm64 / macos-x64 / linux-x64 / linux-arm64 运行时及 `.sha256`）；JetBrains Marketplace update **1174317**（`approve=false` 待审）。**macOS（Apple Silicon）端到端实测通过**（用户验证）。发布前完成凭据自检（`scripts/secret-audit.mjs`）：仓库 91 个文本文件 / 24 条提交信息 / Release 正文 / 本地工作区均无凭据。 |
 | 2026-02-11 | v0.1 | 初稿：基于已确认的产品与技术决策生成 PRD 与 DESIGN（Step 0） |
 | 2026-08-19 | v0.2 | Step 2 运行时自举实现：DshHomeManager/DshProcessManager/PortParser、JCEF 工具窗口、凭据同步、build-runtime.ps1 + buildRuntime 任务、冒烟测试（含真实 dsh web 启动） |

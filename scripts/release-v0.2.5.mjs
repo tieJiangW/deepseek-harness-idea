@@ -36,6 +36,21 @@ function assets() {
   return list;
 }
 
+/**
+ * 读取远端某个资产的文本内容（.sha256 是 65 字节，走 octet-stream 重定向）。
+ * 用来**成对**判断 zip 与 sha256 是否配套 —— 只比大小会漏掉"哈希不同、字节数相同"的情况
+ * （v0.2.5 实测：本地构建与 CI 构建的 runtime zip 字节数相同、sha256 不同，若只补 zip 就会错配）。
+ */
+async function remoteAssetText(name, byName) {
+  const a = byName.get(name);
+  if (!a || a.state !== 'uploaded') return null;
+  const res = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/releases/assets/${a.id}`, {
+    headers: { Authorization: `Bearer ${gh}`, Accept: 'application/octet-stream', 'User-Agent': 'dsh-idea-release' },
+    redirect: 'follow',
+  });
+  return res.ok ? (await res.text()).trim() : null;
+}
+
 async function ghApi(path, init = {}) {
   const res = await fetch(`https://api.github.com${path}`, {
     ...init,
@@ -91,12 +106,14 @@ if (!gh) {
   }
   const releaseId = rel.json.id;
 
-  // 3) 上传资产（同名先删再传 → 幂等）
+  // 3) 同步资产：以 .sha256 内容为准**成对**更新（避免 zip 与校验文件错配）
   const existing = await ghApi(`/repos/${OWNER}/${REPO}/releases/${releaseId}/assets?per_page=100`);
-  const byName = new Map((existing.json || []).map((a) => [a.name, a.id]));
-  for (const a of assets()) {
-    if (byName.has(a.name)) {
-      await ghApi(`/repos/${OWNER}/${REPO}/releases/assets/${byName.get(a.name)}`, { method: 'DELETE' });
+  let byName = new Map((existing.json || []).map((a) => [a.name, a]));
+
+  async function replace(a) {
+    const have = byName.get(a.name);
+    if (have) {
+      await ghApi(`/repos/${OWNER}/${REPO}/releases/assets/${have.id}`, { method: 'DELETE' });
       console.log(`  removed existing asset ${a.name}`);
     }
     const body = readFileSync(a.path);
@@ -117,7 +134,47 @@ if (!gh) {
     console.log(`  upload ${a.name}: HTTP ${up.status} ${up.ok ? 'OK' : text.slice(0, 200)}`);
     if (!up.ok) await sleep(2000);
   }
-  console.log(`assets: ${assets().length} uploaded`);
+
+  // 插件 zip：小文件，始终重传（保证与本地构建一致）
+  const pluginAsset = assets().find((a) => a.name === 'deepseek-harness-idea-0.2.5.zip');
+  if (pluginAsset) await replace(pluginAsset);
+
+  // 运行时：远端 sha256 与本地一致才跳过；否则 zip + sha256 一起重传
+  for (const p of PLATFORMS) {
+    const shaName = `runtime-${p}.zip.sha256`;
+    const zipName = `runtime-${p}.zip`;
+    const localShaFile = join('release-assets', shaName);
+    const zipFile = join('release-assets', zipName);
+    if (!existsSync(zipFile)) { console.log(`  skip ${zipName} (not built locally)`); continue; }
+    const localSha = existsSync(localShaFile) ? readFileSync(localShaFile, 'utf8').trim().toLowerCase() : null;
+    const remoteSha = (await remoteAssetText(shaName, byName)) || '';
+    if (localSha && remoteSha.toLowerCase() === localSha) {
+      console.log(`  keep ${zipName} + ${shaName} (sha256 matches)`);
+      continue;
+    }
+    console.log(`  ${zipName}: remote sha256 differs/missing -> re-uploading the pair`);
+    if (existsSync(localShaFile)) {
+      await replace({ path: localShaFile, name: shaName, type: 'text/plain' });
+    }
+    await replace({ path: zipFile, name: zipName, type: 'application/zip' });
+  }
+
+  // 4) 复核：每个平台的远端 sha256 必须与本地一致
+  const after = await ghApi(`/repos/${OWNER}/${REPO}/releases/${releaseId}/assets?per_page=100`);
+  byName = new Map((after.json || []).map((a) => [a.name, a]));
+  let mismatched = 0;
+  for (const p of PLATFORMS) {
+    const shaName = `runtime-${p}.zip.sha256`;
+    const localShaFile = join('release-assets', shaName);
+    if (!existsSync(localShaFile)) continue;
+    const localSha = readFileSync(localShaFile, 'utf8').trim().toLowerCase();
+    const remoteSha = ((await remoteAssetText(shaName, byName)) || '').toLowerCase();
+    const ok = localSha === remoteSha;
+    if (!ok) mismatched++;
+    console.log(`  ${ok ? 'OK  ' : 'BAD '} ${p}`);
+  }
+  console.log(`assets now: ${(after.json || []).length}, mismatched sha256: ${mismatched}`);
+
 
   // 4) 校验：tag 指向与 main HEAD（打印出来便于人工确认）
   const ref = await ghApi(`/git/ref/tags/${TAG}`);

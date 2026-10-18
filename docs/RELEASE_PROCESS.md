@@ -278,6 +278,12 @@ node scripts/secret-audit.mjs
   `403 Authentication Failed: token is invalid`；两者都必须**重新签发**（旧值无法找回）。
   排查手法：会话数据是 `session.jsonl.zstd` 的**多帧 append** 格式（每行一个独立 zstd 帧，帧间可能有填充字节），
   直接用 `zstdDecompressSync` 只解第一帧；需按帧 magic（`0xFD2FB528`）扫描帧边界后逐帧解压才能搜全量文本。
+- **⚠️ 资产必须「成对」同步（v0.2.5 实测踩坑）**：tag 触发的 CI（`build-release.yml`）会重建并上传
+  win-x64 / macos-arm64 / linux-x64 的 zip 与 `.sha256`；而**本地构建与 CI 构建的 zip 字节数可能相同、sha256 不同**。
+  因此补传时若只按 size 跳过 sha256，就会出现「zip 来自本地、sha256 来自 CI」→ 用户首次下载运行时**校验必失败**。
+  正确做法：**以远端 `.sha256` 内容与本地比对为准，配对重传**（zip + sha256 一起换），并在上传后复核 5 平台全部一致；
+  `scripts/release-v0.2.5.mjs` 已按此实现（`remoteAssetText` + 末尾复核）。
+- **v0.2.5 发布结果**：GitHub Release id **416360059**（11 资产，tag `v0.2.5 → 395f425`，main `201f4c4`）+ Marketplace update **1197216**。
 - **`release-assets/` 已在 `.gitignore`**：存放跨平台 runtime zip（体积大），只作为 GitHub Release 的资产来源，**不入库**。
 - **v0.2.4 实操记录**：`main` 与 tag 常规推送（首轮 `github.com:443` 可用，之后同一会话内转为超时，API 不受影响）；
   GitHub Release `v0.2.4`（id 391244240，11 资产）+ Marketplace update **1174317**（`approve=false` 待审）。
