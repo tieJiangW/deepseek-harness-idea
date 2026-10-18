@@ -811,4 +811,15 @@ x64 对应 `*-darwin-x64`）。
    - `ide_open_file`/`ide_reveal_file` 目前实现为"打开"，项目树定位（reveal）可再增强（B-3）。
    - MCP patch 的 `failOnStartupError` 仅测试形态；生产可用 `reconnect` 语义（C-4）。
    - 远程开发/Gateway 环境检测提示未实现（B-2）；输入框文件引用 chip 为上游 dsh 能力，随版本升级跟踪（B-4）。
-4. **文档约定**：改代码前先更新 PRD/DESIGN（活文档）；每个实现步骤后在 README 变更记录追加。
+4. **v0.2.5 之后的优化清单（2026-10-18，详细版见 [v0.2.5-retrospective.md](./v0.2.5-retrospective.md)）**：
+   - **P0 发布流程**：runtime 资产只能有一个来源（CI 或本地二选一）—— 本次实测 CI 与本地构建的 zip
+     **字节数相同、sha256 不同**，只按大小跳过校验文件会导致用户下载运行时校验失败（已修复并加复核）；
+     token 流程固定为「发布前验证（GET /user 或只读调用）→ 发布 → 立即轮换」，`secret-audit.mjs` 的 needle 纳入旧值。
+   - **P0 手工验收**：DSH 插件页观感、一键重启、卸载兜底后重启不加载、JCEF 内 composer 注入、多项目并发。
+   - **P1 可测性/可观测性**：把插件页状态机抽成纯类做单测（现在 UI 层零自动化）；`DshHarnessControl` 补
+     「dispose → reopen → restart」集成测试；一键诊断包（manifest + `.modules.yaml` + 最近日志 + 环境）。
+   - **P2 产品**：npm registry 搜索候选、表格「待生效」标记、`dsh plugin update` 检查、`node_modules` 残留清理、
+     共享范围可视化（哪些项目共享同一 profile）。
+   - **沿用技术债**：Gradle IntelliJ 插件 2.x、单实例多工作区、`ide_reveal_file` 定位、远程开发提示。
+5. **文档约定**：改代码前先更新 PRD/DESIGN（活文档）；每个实现步骤后在 README 变更记录追加；
+   每轮现场问题在 PROJECT_NOTES 追加「现象 → 真因 → 修复」，并在复盘文档汇总。

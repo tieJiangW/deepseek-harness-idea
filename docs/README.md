@@ -34,8 +34,9 @@
 - **⚠️ 本机环境注意**：`github.com:443` 不稳定（`api.github.com`、`uploads.github.com`、`plugins.jetbrains.com` 可达）；
   `tooling/runtime-dev` 必须与 `DshHomeManager.DSH_VERSION` 一致（已对齐 0.1.5-rc.2，旧 0.1.1 树保存在
   `tooling/runtime-dev/dsh-0.1.1-backup`），否则冒烟测试会以旧契约（点号 RPC、无 token）失败
-- **下一步候选**：① 会话/附件磁盘清理入口（`attachments` 无限累积）；② `ide_reveal_file` 项目树定位；
-  ③ 远程开发/Gateway 检测提示；④ `org.jetbrains.intellij` 1.17.4 → 2.x；⑤ 插件市场截图补「DSH 插件」页
+- **下一步**：见 [v0.2.5-retrospective.md §6](./v0.2.5-retrospective.md) —— 优先 **P0 发布流程**（资产单一来源、
+  token 校验/轮换）与 **P0 真实 IDE 手工验收 A1–A5**；随后 P1（UI 状态机抽纯类 + 平台测试、一键诊断包）、
+  P2（registry 搜索、待生效标记、更新检查、残留清理、共享范围可视化）；技术债（Gradle IntelliJ 2.x）单独一轮
 
 ## 文档索引
 
@@ -48,6 +49,7 @@
 | [PROJECT_NOTES.md](./PROJECT_NOTES.md) | 项目知识库：本机构建环境、dsh 行为实测、踩坑记录、2024.1 API 勘误、后续任务参考 | 维护中（v0.2.5，260 项测试全部通过） |
 | [release-runtime.md](./release-runtime.md) | 运行时发布与资产契约：平台矩阵、原生构建/交叉构建、下载与解压、离线场景 | 维护中（v0.2.3：五平台资产已发布） |
 | [RELEASE_PROCESS.md](./RELEASE_PROCESS.md) | 发布流程参考（GitHub Release + JetBrains Marketplace）：凭据、步骤、接口、编码陷阱、API 备用通道 | 维护中（v0.2.3 / v0.2.4 实操验证；v0.2.5 用 release-v0.2.5.mjs） |
+| [v0.2.5-retrospective.md](./v0.2.5-retrospective.md) | **v0.2.5 复盘与后续优化依据**：交付清单、七轮现场问题因果链、可复用排查手法、遗留与 P0/P1/P2 优化清单 | 维护中（2026-10-18） |
 | [marketplace-listing.md](./marketplace-listing.md) | Marketplace 上架填写：短描述、分类标签、数据收集声明、截图建议（当前 v0.2.5） | 维护中 |
 | [releases/](./releases/) | 各版本发布说明（中英双语，GitHub Release 正文即取自 v0.2.5.md） | 维护中 |
 
